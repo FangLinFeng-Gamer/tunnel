@@ -1,0 +1,348 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "description": "CES-告警规则管理",
+    "title": "CES",
+    "version": "2025-09-02",
+    "x-host_prefix": "ces",
+    "x-host": "ces.{region}.myhuaweicloud.com"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "MetricInfo": {
+        "required": [
+          "namespace",
+          "metric_name",
+          "dimensions"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "description": "服务指标命名空间,格式为service.item;service和item必须是字符串,必须以字母开头,只能包含0-9/a-z/A-Z/_,字符总长度最短为3,最大为32。说明: 当alarm_type为(EVENT.SYS| EVENT.CUSTOM)时允许为空;如:弹性云服务器的命名空间为SYS.ECS,文档数据库的命名空间为SYS.DDS,各服务的命名空间可查看:“[服务命名空间](https://support.huaweicloud.com/usermanual-ces/zh-cn_topic_0202622212.html)”。",
+            "minLength": 3,
+            "maxLength": 32
+          },
+          "metric_name": {
+            "type": "string",
+            "description": "资源的监控指标名称,必须以字母开头,只能包含0-9/a-z/A-Z/_,字符长度最短为1,最大为64;如:弹性云服务器中的监控指标cpu_util,表示弹性服务器的CPU使用率;文档数据库中的指标mongo001_command_ps,表示command执行频率;各服务的指标名称可查看:“[服务指标名称](https://support.huaweicloud.com/usermanual-ces/zh-cn_topic_0202622212.html)”。",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "dimensions": {
+            "type": "array",
+            "description": "指标维度,目前最大可添加4个维度。",
+            "items": {
+              "$ref": "#/components/schemas/MetricsDimension"
+            }
+          }
+        },
+        "description": "指标信息",
+        "type": "object"
+      },
+      "MetricsDimension": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "资源维度,如:弹性云服务器,则维度为instance_id;目前最大支持4个维度,各服务资源的指标维度名称可查看:“[服务指标维度](https://support.huaweicloud.com/usermanual-ces/zh-cn_topic_0202622212.html)”。",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "([a-z]|[A-Z]){1}([a-z]|[A-Z]|[0-9]|_|-)*$"
+          },
+          "value": {
+            "type": "string",
+            "description": "资源维度值,为资源的实例ID,如:4270ff17-aba3-4138-89fa-820594c39755。",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "([a-z]|[A-Z]|[0-9]){1}([a-z]|[A-Z]|[0-9]|_|-)*$"
+          }
+        },
+        "description": "指标维度",
+        "required": [
+          "name",
+          "value"
+        ],
+        "type": "object"
+      },
+      "BatchListMetricDataRequestBody": {
+        "required": [
+          "metrics",
+          "period",
+          "filter",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "metrics": {
+            "type": "array",
+            "description": "指标数据。数组长度最大500",
+            "items": {
+              "$ref": "#/components/schemas/MetricInfo"
+            }
+          },
+          "period": {
+            "type": "string",
+            "description": "指标监控数据的聚合粒度,取值范围:1,300,1200,3600,14400,86400;1为监控资源的实时数据;300为聚合5分钟粒度数据,表示5分钟一个数据点;1200为聚合20分钟粒度数据,表示20分钟一个数据点;3600为聚合1小时粒度数据,表示1小时一个数据点;14400为聚合4小时粒度数据,表示4小时一个数据点;86400为聚合1天粒度数据,表示1天一个数据点;聚合解释可查看:“[聚合含义](https://support.huaweicloud.com/ces_faq/ces_faq_0009.html)”。"
+          },
+          "filter": {
+            "type": "string",
+            "description": "数据聚合方式。  支持的值为max, min, average, sum, variance;max为最大值,min为最小值,average为平均值,sum为和,variance为方差值。"
+          },
+          "from": {
+            "type": "integer",
+            "format": "int64",
+            "description": "查询数据起始时间,UNIX时间戳,单位毫秒。建议from的值相对于当前时间向前偏移至少1个周期。由于聚合运算的过程是将一个聚合周期范围内的数据点聚合到周期起始边界上,如果将from和to的范围设置在聚合周期内,会因为聚合未完成而造成查询数据为空,所以建议from参数相对于当前时间向前偏移至少1个周期。以5分钟聚合周期为例:假设当前时间点为10:35,10:30~10:35之间的原始数据会被聚合到10:30这个点上,所以查询5分钟数据点时from参数应为10:30或之前。 说明: 云监控会根据所选择的聚合粒度向前取整from参数;如:1607146998177"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int64",
+            "description": "查询数据截止时间UNIX时间戳,单位毫秒。from必须小于to;如:1607150598177。"
+          }
+        },
+        "description": "",
+        "type": "object"
+      },
+      "BatchListMetricDataResponseBody": {
+        "properties": {
+          "metrics": {
+            "type": "array",
+            "description": "监控指标。",
+            "items": {
+              "$ref": "#/components/schemas/BatchMetricData"
+            }
+          }
+        },
+        "description": "",
+        "type": "object"
+      },
+      "DatapointForBatchMetric": {
+        "required": [
+          "timestamp"
+        ],
+        "properties": {
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "聚合周期内指标数据的最大值。"
+          },
+          "min": {
+            "type": "number",
+            "description": "聚合周期内指标数据的最小值。",
+            "format": "double"
+          },
+          "average": {
+            "type": "number",
+            "description": "聚合周期内指标数据的平均值。",
+            "format": "double"
+          },
+          "sum": {
+            "type": "number",
+            "description": "聚合周期内指标数据的求和值。",
+            "format": "double"
+          },
+          "variance": {
+            "type": "number",
+            "description": "聚合周期内指标数据的方差。",
+            "format": "double"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "指标采集时间,UNIX时间戳,单位毫秒。"
+          }
+        },
+        "description": "",
+        "type": "object"
+      },
+      "BatchMetricData": {
+        "required": [
+          "datapoints",
+          "metric_name"
+        ],
+        "properties": {
+          "unit": {
+            "type": "string",
+            "description": "指标单位。"
+          },
+          "datapoints": {
+            "type": "array",
+            "description": "指标数据列表。由于查询数据时,云监控会根据所选择的聚合粒度向前取整from参数,所以datapoints中包含的数据点有可能会多于预期。",
+            "items": {
+              "$ref": "#/components/schemas/DatapointForBatchMetric"
+            }
+          },
+          "namespace": {
+            "type": "string",
+            "description": "指标命名空间,格式为service.item;service和item必须是字符串,必须以字母开头,只能包含0-9/a-z/A-Z/_,总长度最短为3,最大为32;各服务的命名空间可查看:“[服务命名空间](https://support.huaweicloud.com/usermanual-ces/zh-cn_topic_0202622212.html)”。"
+          },
+          "metric_name": {
+            "type": "string",
+            "description": "指标名称,例如弹性云服务器监控指标中的cpu_util;各服务的指标名称可查看:“[服务指标名称](https://support.huaweicloud.com/usermanual-ces/zh-cn_topic_0202622212.html)”。"
+          },
+          "dimensions": {
+            "type": "array",
+            "description": "指标维度列表。",
+            "items": {
+              "$ref": "#/components/schemas/MetricsDimension"
+            }
+          }
+        },
+        "description": "",
+        "type": "object"
+      }
+    }
+  },
+  "paths": {
+    "/BatchListMetricData": {
+      "post": {
+        "tags": [
+          "监控数据管理"
+        ],
+        "summary": "批量查询监控数据",
+        "description": "批量查询指定时间范围内指定指标的指定粒度的监控数据,目前最多支持500指标的批量查询。 对于不同的period取值和查询的指标数量,默认的最大查询区间(to-from)不同。 规则为\"指标数量*(to-from)/监控周期<=3000\",若超出阈值,会自动调整from以满足规则。",
+        "operationId": "BatchListMetricData",
+        "deprecated": false,
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchListMetricDataResponseBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "请求错误。"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "未提供认证信息,或认证信息错误。"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "请求页面被禁止访问。"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Request Timeout",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "请求超出了服务器的等待时间。"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too Many Requests",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "前请求过多。"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "请求未完成,服务异常。"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string",
+                  "description": "系统暂时不可用,请求受限。"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Content-Type",
+            "in": "header",
+            "description": "发送的实体的MIME类型。推荐用户默认使用application/json,如果API是对象、镜像上传等接口,媒体类型可按照流类型的不同进行确定。",
+            "required": true,
+            "schema": {
+              "description": "发送的实体的MIME类型。推荐用户默认使用application/json,如果API是对象、镜像上传等接口,媒体类型可按照流类型的不同进行确定。",
+              "type": "string",
+              "default": "application/json; charset=UTF-8"
+            }
+          },
+          {
+            "name": "X-Auth-Token",
+            "in": "header",
+            "description": "用户Token。用户Token也就是调用获取用户Token接口的响应值,该接口是唯一不需要认证的接口。请求响应成功后在响应消息头中包含的“X-Subject-Token”的值即为Token值。",
+            "required": true,
+            "schema": {
+              "description": "用户Token。用户Token也就是调用获取用户Token接口的响应值,该接口是唯一不需要认证的接口。请求响应成功后在响应消息头中包含的“X-Subject-Token”的值即为Token值。",
+              "type": "string"
+            }
+          },
+          {
+            "name": "project_id",
+            "in": "path",
+            "description": "项目编号。",
+            "required": true,
+            "schema": {
+              "description": "项目编号。",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchListMetricDataRequestBody"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "x-method": "post",
+      "x-content-type": "application/json;charset=UTF-8",
+      "x-operationId": "BatchListMetricData",
+      "x-url": "{endpoint}/V1.0/{project_id}/batch-query-metric-data"
+    }
+  }
+}
