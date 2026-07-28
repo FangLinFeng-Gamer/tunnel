@@ -1,0 +1,2 @@
+"""Analysis profile registry."""
+
