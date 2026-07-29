@@ -14,9 +14,7 @@ DEFAULT_HISTORICAL_TTL_SECONDS = 86_400
 DEFAULT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_CACHE_MAX_ENTRIES = 1024
 
-# The CES tool is registered by the deployment. Keep the CLI shape fixed here
-# and set the concrete tool name when registration is complete.
-CES_MCP_TOOL_NAME = ""
+CES_MCP_TOOL_NAME = "ces_BatchListMetricData"
 MCP_CLI_COMMAND_PREFIX = (
     "cli-anything-huaweicloud-mcp",
     "--json",

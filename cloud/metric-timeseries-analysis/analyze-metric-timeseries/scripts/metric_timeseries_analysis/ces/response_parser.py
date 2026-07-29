@@ -1,29 +1,55 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from metric_timeseries_analysis.errors import MetricAnalysisError
 from metric_timeseries_analysis.series.model import MetricSeriesMap
 
 
-def unwrap_backend_json(payload: Any) -> dict[str, Any]:
+def unwrap_mcp_cli_envelope(payload: Any, expected_tool_name: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
-        raise MetricAnalysisError("data_fetch_failed", "CES backend must return a JSON object")
-    if "metrics" in payload:
-        return payload
-    for key in ("data", "result", "response"):
-        value = payload.get(key)
-        if isinstance(value, dict) and "metrics" in value:
-            return value
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict) and "metrics" in parsed:
-                return parsed
-    return payload
+        raise MetricAnalysisError("data_fetch_failed", "MCP CLI output must be a JSON object")
+
+    actual_tool_name = payload.get("tool")
+    if actual_tool_name != expected_tool_name:
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            f"MCP CLI returned unexpected tool: {actual_tool_name!r}",
+        )
+
+    if not isinstance(payload.get("arguments"), dict):
+        raise MetricAnalysisError("data_fetch_failed", "MCP CLI envelope is missing arguments")
+
+    content = payload.get("content")
+    content_count = payload.get("content_count")
+    if not isinstance(content, list) or type(content_count) is not int:
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            "MCP CLI envelope must contain content and content_count",
+        )
+    if content_count != len(content):
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            "MCP CLI content_count does not match content length",
+        )
+    if content_count != 1:
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            "CES MCP CLI must return exactly one content item",
+        )
+
+    result = payload.get("result")
+    if not isinstance(result, dict) or result != content[0]:
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            "MCP CLI envelope must expose its single content item as result",
+        )
+    if not isinstance(result.get("metrics"), list):
+        raise MetricAnalysisError(
+            "data_fetch_failed",
+            "CES MCP result must contain a metrics list",
+        )
+    return result
 
 
 def extract_series(raw: dict[str, Any], preferred_filter: str) -> MetricSeriesMap:

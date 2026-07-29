@@ -4,7 +4,7 @@ import json
 import subprocess
 from typing import Any, Sequence
 
-from metric_timeseries_analysis.ces.response_parser import unwrap_backend_json
+from metric_timeseries_analysis.ces.response_parser import unwrap_mcp_cli_envelope
 from metric_timeseries_analysis.constants import (
     CES_FETCH_TIMEOUT_SECONDS,
     CES_MCP_TOOL_NAME,
@@ -34,16 +34,20 @@ class McpCliCesFetcher:
             raise MetricAnalysisError("data_fetch_failed", f"failed to start CES MCP CLI: {exc}") from exc
 
         if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()[:1000]
-            raise MetricAnalysisError("data_fetch_failed", f"CES MCP CLI exited with {completed.returncode}: {stderr}")
+            detail = _failed_cli_detail(completed)
+            raise MetricAnalysisError(
+                "data_fetch_failed",
+                f"CES MCP CLI exited with {completed.returncode}: {detail}",
+            )
 
         payload_text = (completed.stdout or "").strip()
         if not payload_text:
             raise MetricAnalysisError("data_fetch_failed", "CES MCP CLI returned empty output")
         try:
-            return unwrap_backend_json(json.loads(payload_text))
+            payload = json.loads(payload_text)
         except json.JSONDecodeError as exc:
             raise MetricAnalysisError("data_fetch_failed", f"CES MCP CLI returned non-JSON output: {exc}") from exc
+        return unwrap_mcp_cli_envelope(payload, self.tool_name)
 
     def render_command(self, ces_query: dict[str, Any]) -> list[str]:
         if not self.tool_name:
@@ -64,3 +68,19 @@ def _mcp_tool_arguments(ces_query: dict[str, Any]) -> dict[str, Any]:
         "period": str(body["period"]),
         "filter": body["filter"],
     }
+
+
+def _failed_cli_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    stdout = (completed.stdout or "").strip()
+    if stdout:
+        try:
+            payload = json.loads(stdout)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+            return payload["error"][:1000]
+
+    stderr = (completed.stderr or "").strip()
+    if stderr:
+        return stderr[:1000]
+    return "no error detail returned"
