@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-from typing import Any, Sequence
+from typing import Any
 
 from metric_timeseries_analysis.ces.response_parser import unwrap_mcp_cli_envelope
 from metric_timeseries_analysis.constants import (
     CES_FETCH_TIMEOUT_SECONDS,
     CES_MCP_TOOL_NAME,
-    MCP_CLI_COMMAND_PREFIX,
+    HUAWEICLOUD_MCP_CLI_EXECUTABLE,
 )
 from metric_timeseries_analysis.errors import MetricAnalysisError
 
@@ -17,11 +17,11 @@ class McpCliCesFetcher:
     def __init__(
         self,
         tool_name: str = CES_MCP_TOOL_NAME,
-        command_prefix: Sequence[str] = MCP_CLI_COMMAND_PREFIX,
+        cli_executable: str = HUAWEICLOUD_MCP_CLI_EXECUTABLE,
         timeout_seconds: int = CES_FETCH_TIMEOUT_SECONDS,
     ) -> None:
         self.tool_name = tool_name.strip()
-        self.command_prefix = tuple(command_prefix)
+        self.cli_executable = cli_executable.strip()
         self.timeout_seconds = timeout_seconds
 
     def fetch(self, ces_query: dict[str, Any]) -> dict[str, Any]:
@@ -50,11 +50,19 @@ class McpCliCesFetcher:
         return unwrap_mcp_cli_envelope(payload, self.tool_name)
 
     def render_command(self, ces_query: dict[str, Any]) -> list[str]:
+        if not self.cli_executable:
+            raise MetricAnalysisError("data_fetch_failed", "HuaweiCloud MCP CLI executable is not configured")
         if not self.tool_name:
             raise MetricAnalysisError("data_fetch_failed", "CES MCP tool name is not configured")
         arguments = _mcp_tool_arguments(ces_query)
         arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-        return [*self.command_prefix, self.tool_name, "--args", arguments_json]
+        return [
+            self.cli_executable,
+            "call",
+            self.tool_name,
+            "--args",
+            arguments_json,
+        ]
 
 
 def _mcp_tool_arguments(ces_query: dict[str, Any]) -> dict[str, Any]:

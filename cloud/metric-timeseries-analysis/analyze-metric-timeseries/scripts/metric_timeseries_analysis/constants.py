@@ -14,9 +14,5 @@ DEFAULT_HISTORICAL_TTL_SECONDS = 86_400
 DEFAULT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 DEFAULT_CACHE_MAX_ENTRIES = 1024
 
+HUAWEICLOUD_MCP_CLI_EXECUTABLE = "huaweicloud-mcp"
 CES_MCP_TOOL_NAME = "ces_BatchListMetricData"
-MCP_CLI_COMMAND_PREFIX = (
-    "cli-anything-huaweicloud-mcp",
-    "--json",
-    "call",
-)
