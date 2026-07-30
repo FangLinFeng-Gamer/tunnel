@@ -5,144 +5,99 @@ description: Analyzes cloud monitoring metric time series for database and servi
 
 # Analyze Metric Time-Series
 
-Use this skill when a service diagnosis workflow needs compact analysis of monitoring metric time-series data. Run the bundled script with a `MetricAnalysisSpec` and use the returned `AnalysisResult` as diagnostic evidence.
+Use this skill to turn one cloud metric query into compact diagnostic evidence. The bundled script fetches CES data internally, caches it, runs one analysis profile, and returns structured JSON without exposing raw datapoints.
 
-Provide a compact `MetricAnalysisSpec` rather than raw datapoints. The bundled script fetches, caches, normalizes, and analyzes the metric time series, then prints a compact JSON `AnalysisResult`.
+## Workflow
 
-Before constructing CLI input or interpreting CLI output, read [references/analysis-contract.md](references/analysis-contract.md). It defines the complete `MetricAnalysisSpec`, profile options, `AnalysisResult`, and error JSON contracts.
+1. Confirm that the task needs time-series judgment rather than a current-value lookup.
+2. Choose the profile that matches the diagnostic question.
+3. Collect resource identifiers, a natural-language time range, and the remaining inputs from the user or trusted tool results.
+4. Resolve the user's time range into `time_window.from` and `time_window.to`.
+5. Check the required-input list. If anything is missing, ask once and stop.
+6. Inspect profile help only when its options are unclear.
+7. Run the public CLI exactly once with compact JSON in `--args`.
+8. Branch on `success` or `error`; do not invent another calling convention.
 
-## Script
+## Required Inputs
 
-Run:
+Before execution, confirm concrete values for:
+
+- [ ] `region`
+- [ ] `project_id`
+- [ ] `metric.namespace`
+- [ ] `metric.metric_name`
+- [ ] Every `metric.dimensions[].name` and `.value`
+- [ ] A user-facing time range, such as "the last hour" or "yesterday from 09:00 to 12:00"
+- [ ] `period`
+- [ ] `analysis.profile`
+- [ ] `analysis.threshold` when using `sliding_window_threshold_frequency_detection`
+
+If any required value is unavailable, ask the user for all missing fields in one clarification. Do not run or retry the script while required fields are missing. Never invent values or submit example placeholders. Optional profile parameters may be omitted so the script applies its defaults.
+
+## Resolve The Time Window
+
+Convert the user's natural-language time range into integer millisecond timestamps before building `MetricAnalysisSpec`:
+
+- Resolve relative expressions against the current date and time.
+- Use an explicit user timezone when provided; otherwise use the session or user timezone.
+- Set the resolved start to `time_window.from` and end to `time_window.to`, with `from < to`.
+- If the range is missing, ask which period to analyze in natural language.
+- If timezone or boundary ambiguity would materially change the range, ask a natural-language clarification.
+
+Never ask the user to provide millisecond timestamps or perform the conversion.
+
+## Choose A Profile
+
+| Profile | Use when |
+| --- | --- |
+| `sliding_window_threshold_frequency_detection` | The diagnosis needs the frequency of values above or below a threshold. |
+| `spike_drop_detection` | The diagnosis needs abrupt spike or drop evidence. |
+| `median_p75_statistics` | The diagnosis needs median and p75 baseline values. |
+| `rising_trend_detection` | The diagnosis needs upward, downward, or unclear direction from adjacent changes. |
+| `trend_prediction` | The diagnosis needs a seven-day forecast and at least seven days of history are available. |
+
+Do not guess profile options. Inspect only the selected profile:
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py \
-  analyze --args '{"region":"cn-north-4","project_id":"project-xxx","metric":{"namespace":"SYS.RDS","metric_name":"cpu_util","dimensions":[{"name":"instance_id","value":"rds-xxx"}]},"time_window":{"from":1784160000000,"to":1784764800000},"period":3600,"analysis":{"profile":"trend_prediction"}}'
+python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
-`--args` takes the `MetricAnalysisSpec` JSON object as a string, not a file path. A calling skill should serialize the object to compact JSON and pass it directly; it does not create a temporary spec file.
+## Run
 
-CES fetching is internal to the bundled script. Do not put MCP CLI commands, raw CES queries, or raw datapoints in `MetricAnalysisSpec`.
-
-Inspect profile parameters from the CLI instead of guessing them:
+After replacing every field with a concrete value, serialize one `MetricAnalysisSpec` object as compact JSON:
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profiles
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile trend_prediction
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile sliding_window_threshold_frequency_detection --help
+python3 scripts/analyze_metric_timeseries.py \
+  analyze --args '<MetricAnalysisSpec JSON>'
 ```
 
-## MetricAnalysisSpec
+`--args` accepts a JSON object string, not a file path or individual field flags.
 
-```json
-{
-  "region": "cn-north-4",
-  "project_id": "project-xxx",
-  "metric": {
-    "namespace": "SYS.RDS",
-    "metric_name": "cpu_util",
-    "dimensions": [
-      {
-        "name": "instance_id",
-        "value": "rds-xxx"
-      }
-    ]
-  },
-  "time_window": {
-    "from": 1784200000000,
-    "to": 1784210000000
-  },
-  "period": 300,
-  "analysis": {
-    "profile": "rising_trend_detection"
-  }
-}
-```
+## Handle Results
 
-The caller does not provide a CES aggregation filter. The script always queries and reads the `average` value.
+- `success=true`: use `summary`, `findings`, and optional `statistics` or `forecast` as diagnostic evidence.
+- `invalid_request` for missing input: ask for all missing values together and stop; do not guess and retry.
+- Other `invalid_request`: report the rejected field or option from `message`.
+- `query_too_large`: increase `period` or split the query by time; preserve the user's diagnostic intent.
+- `data_fetch_failed`: stop and report that the internal CES MCP CLI adapter failed.
+- `internal_error`: stop and report that analysis failed internally.
+- Argparse exit code `2`: run `python3 scripts/analyze_metric_timeseries.py analyze --help`, correct the documented syntax, and retry once.
 
-`metric.dimensions` follows the Huawei Cloud CES `MetricInfo.dimensions` shape: an array of `{ "name": "...", "value": "..." }` objects. `dimensions[].name` must use the dimension key required by the target CES metric. The `instance_id` shown above is only an example and is valid only when that metric's CES documentation defines `instance_id` as its dimension.
+Never include raw datapoints in prompts, tool results, or final answers.
 
-The script validates CES field limits and rejects profile options that are unknown, have the wrong JSON type, or violate the profile's documented constraints. Cache policy is internal and is not accepted in `MetricAnalysisSpec`.
+## Gotchas
 
-`analysis.profile` is required. Choose one profile from the table:
+- Run bundled paths relative to this skill's root.
+- The environment needs Python 3.10+, packages from `requirements.txt`, and a configured `huaweicloud-mcp` command.
+- The script is the only public execution entry point. Do not use `python -c`, import internal modules, instantiate profile classes, or call CES directly.
+- CES fetching, the `average` aggregation filter, dataset storage, cache policy, and cache keys are internal.
+- A dimension name is metric-specific. Use `instance_id` only when the target CES metric defines that dimension.
+- Do not probe alternative Python imports, class names, subcommands, or parameter styles after a failure.
 
-| Profile | Use For | Important Options |
-| --- | --- | --- |
-| `sliding_window_threshold_frequency_detection` | Count how often values cross a threshold inside rolling windows. Use for questions such as "how frequently CPU stays above 80%". | `threshold` required; `direction` is `above` or `below`; `window_points`; `min_frequency`. |
-| `spike_drop_detection` | Detect residual or smoothed-trend spike/drop outliers after filtering normal fluctuation. Use for abrupt anomaly evidence. | Optional `box_scale`, `direction`, `window_size`, `residual_sen`, and `nonzero`. |
-| `median_p75_statistics` | Median-smooth the series and compute baseline distribution statistics. Use when the diagnosis needs median and p75 values. | Optional `smoothing_time` in seconds; defaults to 900 seconds. |
-| `rising_trend_detection` | Compare counts of rising and falling adjacent datapoint changes. Use when the diagnosis needs upward, downward, or unclear direction evidence. | No additional options. |
-| `trend_prediction` | Use Prophet to forecast the next 168 hourly values from at least seven days of history. | No additional options. |
+## References
 
-For `sliding_window_threshold_frequency_detection`, include:
+Read `references/analysis-contract.md` only when:
 
-```json
-{
-  "analysis": {
-    "profile": "sliding_window_threshold_frequency_detection",
-    "threshold": 80,
-    "direction": "above",
-    "window_points": 5,
-    "min_frequency": 3
-  }
-}
-```
-
-## Result Contract
-
-The script prints compact JSON only. It must not print raw datapoints.
-
-```json
-{
-  "success": true,
-  "metric_name": "cpu_util",
-  "profile": "trend_prediction",
-  "summary": "Forecasted the next seven days with Prophet.",
-  "findings": [
-    {
-      "kind": "upward_trend",
-      "severity": "warning",
-      "metric_name": "cpu_util",
-      "confidence": 1.0,
-      "evidence": {
-        "forecast_hours": 168,
-        "start_time": 1784768400000,
-        "end_time": 1785369600000,
-        "first_predicted_value": 40.2,
-        "last_predicted_value": 53.8,
-        "min_predicted_value": 39.5,
-        "max_predicted_value": 56.1,
-        "mean_predicted_value": 47.3,
-        "change": 13.6,
-        "change_ratio": 0.3383,
-        "direction": "upward"
-      }
-    }
-  ],
-  "forecast": {
-    "forecast_hours": 168,
-    "start_time": 1784768400000,
-    "end_time": 1785369600000,
-    "first_predicted_value": 40.2,
-    "last_predicted_value": 53.8,
-    "min_predicted_value": 39.5,
-    "max_predicted_value": 56.1,
-    "mean_predicted_value": 47.3,
-    "change": 13.6,
-    "change_ratio": 0.3383,
-    "direction": "upward"
-  }
-}
-```
-
-## Rules For Service Skills
-
-- Call this skill/script only when time-series judgment is needed.
-- Do not call CES raw APIs directly from service-category skills.
-- Do not include raw datapoints in prompts, tool results, or final answers.
-- Use `summary`, `findings`, and the optional `statistics` or `forecast` from the script output as evidence.
-- If the script returns `data_fetch_failed`, stop and report that the internal CES MCP CLI adapter failed in this environment.
-- If the script returns `query_too_large`, narrow the time range, increase `period`, or split by metric/time.
-
-See [references/analysis-contract.md](references/analysis-contract.md) for the full `MetricAnalysisSpec`, `AnalysisResult`, cache behavior, and error contract.
+- exact field constraints or profile defaults are needed;
+- profile-specific `statistics`, `forecast`, or finding evidence must be interpreted;
+- CES query limits, cache behavior, or the complete error contract is relevant.

@@ -7,11 +7,13 @@ Pass `MetricAnalysisSpec` directly through the CLI `--args` option as a JSON obj
 CLI input:
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py \
+python3 scripts/analyze_metric_timeseries.py \
   analyze --args '<MetricAnalysisSpec JSON>'
 ```
 
 CLI output is exactly one compact JSON object: `AnalysisResult` on a completed analysis or the error object defined below.
+
+The CLI above is the public execution boundary. Callers must not import implementation modules or invoke profile classes directly. Before calling it, callers must resolve every required field from user input or trusted tool output. If any required field is unavailable, ask the user for all missing fields together and do not invoke the CLI until they are supplied.
 
 ## Boundary
 
@@ -32,6 +34,8 @@ terminal output truncation details
 ```
 
 ## MetricAnalysisSpec
+
+`time_window.from` and `time_window.to` are technical CLI fields, not user-facing inputs. The calling skill accepts a natural-language time range and resolves it to integer millisecond timestamps before constructing this object.
 
 Required fields:
 
@@ -62,9 +66,9 @@ CES field constraints are validated before fetching: `project_id` is 1-64 charac
 Profile parameter help is available from the bundled CLI:
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profiles
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name>
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name> --help
+python3 scripts/analyze_metric_timeseries.py profiles
+python3 scripts/analyze_metric_timeseries.py profile <profile-name>
+python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
 `profile <profile-name>` prints JSON with option names, types, defaults, choices, and an `example_analysis` block that can be copied into `MetricAnalysisSpec.analysis`.

@@ -7,11 +7,13 @@
 CLI 输入：
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py \
+python3 scripts/analyze_metric_timeseries.py \
   analyze --args '<MetricAnalysisSpec JSON>'
 ```
 
 CLI 输出严格为一个紧凑 JSON 对象：分析完成时返回 `AnalysisResult`，失败时返回本文后面定义的错误对象。
+
+上面的 CLI 是公开执行边界。调用方不得导入内部实现模块，也不得直接调用 profile 类。调用前必须从用户输入或可信 tool 结果中取得全部必填字段；存在无法确定的必填字段时，一次性向用户询问所有缺失字段，在用户提供前不得调用 CLI。
 
 ## 边界
 
@@ -32,6 +34,8 @@ terminal 输出截断细节
 ```
 
 ## MetricAnalysisSpec
+
+`time_window.from` 和 `time_window.to` 是 CLI 技术字段，不是面向用户的输入。调用方 skill 接收自然语言时间范围，并在构造该对象前将其解析为整数毫秒时间戳。
 
 必填字段：
 
@@ -62,9 +66,9 @@ analysis profile options
 profile 参数可以直接用内置 CLI 查询：
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profiles
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name>
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name> --help
+python3 scripts/analyze_metric_timeseries.py profiles
+python3 scripts/analyze_metric_timeseries.py profile <profile-name>
+python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
 `profile <profile-name>` 会输出 JSON，包含参数名、类型、默认值、可选值，以及可复制到 `MetricAnalysisSpec.analysis` 的 `example_analysis`。
