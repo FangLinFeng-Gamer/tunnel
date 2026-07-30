@@ -33,13 +33,15 @@ MySQL 故障诊断为什么使用该能力、如何编排 DAS/RDS/MCP/`query_sql
 -> 返回紧凑 AnalysisResult
 ```
 
-当前 MCP CLI 位于同级项目 `huaweicloud-cli`，实际入口为：
+当前 CES MCP CLI 的实际入口为：
 
 ```text
-cli-anything-huaweicloud-mcp
+huaweicloud-mcp
 ```
 
-它是通用 MCP Gateway 客户端，通过 `call <tool-name> --args <JSON>` 调用远端动态注册的 tool。当前项目中没有 CES tool 的注册代码，因此 CES tool 名称暂未确定。
+分析能力通过 `call ces_BatchListMetricData --args <JSON>` 调用 CES 批量指标
+查询 tool。CLI 参数由 `MetricAnalysisSpec` 动态生成，不在 Skill 中写死具体
+区域、项目、实例、指标或时间范围。
 
 ## 3. 目标与边界
 
@@ -62,7 +64,7 @@ cli-anything-huaweicloud-mcp
 - 不缓存 `AnalysisResult`、根因判断或 LLM 最终回答。
 - 不修改 Hermes `terminal` tool。
 - 不在本文定义完整 MySQL 故障诊断流程。
-- 不在 CES tool 注册完成前虚构 tool 名称或 MCP Gateway 对 API 参数的包装形式。
+- 不允许 Skill 绕过分析入口直接拼接 CES MCP CLI 命令。
 
 ## 4. 功能方案
 
@@ -113,8 +115,8 @@ flowchart TB
     end
 
     subgraph Cloud["外部数据获取链路"]
-        McpCli["cli-anything-huaweicloud-mcp<br/>--json call tool --args JSON"]
-        McpService["华为云 MCP Service<br/>CES tool 名称待注册后确定"]
+        McpCli["huaweicloud-mcp<br/>call ces_BatchListMetricData --args JSON"]
+        McpService["华为云 MCP Service<br/>ces_BatchListMetricData"]
         CesApi["华为云 CES<br/>BatchListMetricData API"]
 
         McpCli -->|"MCP tool call"| McpService
@@ -188,10 +190,11 @@ dataset 路径和缓存元数据均停留在通用时序分析能力内部，跨
 | Profile CLI 帮助 | 已实现 | 支持 `profiles` 和 `profile <name>` |
 | 高层 `analyze --args '<JSON>'` | 已实现 | 直接接收 JSON 对象字符串并返回紧凑 JSON，不读写临时 spec 文件 |
 | LLM 可见 `AnalysisResult` | 已实现 | 使用字段白名单，只返回诊断结论和证据，不返回 dataset、cache 或 trace 元数据 |
-| MCP CLI 抽象接口 | 已实现 | `McpCliCesFetcher` 支持注入 tool 名称和命令前缀 |
-| 真实华为云 MCP CLI 命令形态 | 已实现 | 使用 `cli-anything-huaweicloud-mcp --json call <tool-name> --args '<JSON>'` |
+| MCP CLI 抽象接口 | 已实现 | `McpCliCesFetcher` 使用可注入的 CLI executable，并固定按 `call <tool> --args <JSON>` 构造 argv |
+| 真实华为云 MCP CLI 命令形态 | 已实现 | 使用 `huaweicloud-mcp call ces_BatchListMetricData --args '<JSON>'` |
 | CES API 请求/响应 schema | 已确定 | 以官方 `BatchListMetricData` 文档为准 |
-| CES tool 名称和 MCP `inputSchema` 包装 | 未确定 | API 字段已知；等待 MCP Gateway 注册后确认 tool 名称及路径参数/body/region 的包装方式 |
+| CES tool 名称和 MCP 参数包装 | 已确定 | tool 为 `ces_BatchListMetricData`；参数为扁平的 `region`、`project_id`、`metrics`、`period`、`filter`、`from`、`to` |
+| MCP CLI 成功返回 schema | 已确定 | 外层包含 `tool`、`arguments`、`content`、`result`、`content_count`；CES 业务响应位于唯一的 `result` |
 | 并发 single-flight | 已实现 | 同一 cache key 使用跨进程文件系统锁合并并发 miss |
 
 ## 5. 详细功能设计
@@ -557,7 +560,6 @@ period in {1, 60, 300, 1200, 3600, 14400, 86400}
 
 当前 CES 接入仍有以下待完成项：
 
-- CES tool 注册后的真实 MCP `inputSchema` 包装尚未确定，需要据此确认 adapter 字段映射。
 - 500 次/分钟限流由后端返回，调用侧尚未实现专门的退避策略。
 
 ### 5.5 MCP CLI Adapter
@@ -567,27 +569,28 @@ period in {1, 60, 300, 1200, 3600, 14400, 86400}
 `huaweicloud-cli` 当前提供的真实调用形式：
 
 ```bash
-cli-anything-huaweicloud-mcp --json call <tool-name> --args '<JSON>'
+huaweicloud-mcp call ces_BatchListMetricData --args '<JSON>'
 ```
 
 其中：
 
-- `<tool-name>` 是 MCP Gateway 动态注册的 tool 名称。
-- `--args` 接收该 tool 的 MCP `inputSchema` 对应的 JSON 对象。
-- `--json` 输出机器可解析的 JSON。
-- 凭证通过 `--akid` 或 CLI 配置解析，不在分析请求中传递 AK/SK。
-- CLI 没有 `--spec`、stdin 输入或 `--output` 文件参数。
-- 调用结果会打印到 stdout。
+- `huaweicloud-mcp` 是部署环境提供的真实 MCP CLI 命令。
+- `ces_BatchListMetricData` 是已确定的 CES 批量指标查询 tool。
+- `--args` 接收扁平 JSON 对象，包含 `region`、`project_id`、`metrics`、`period`、
+  `filter`、`from` 和 `to`。
+- 凭证和 MCP Server 连接由 `huaweicloud-mcp` 运行环境管理，不进入
+  `MetricAnalysisSpec`。
+- Adapter 要求该命令的 stdout 返回可解析的 CLI JSON envelope。
 
-CES tool 名称当前保持未确定状态。注册完成后必须先执行：
+真实命令示例：
 
 ```bash
-cli-anything-huaweicloud-mcp --json tools schema <registered-tool-name>
+huaweicloud-mcp call ces_BatchListMetricData \
+  --args '{"region":"cn-north-4","project_id":"project-xxx","metrics":[{"namespace":"SYS.RDS","metric_name":"cpu_util","dimensions":[{"name":"instance_id","value":"rds-xxx"}]}],"period":"300","filter":"average","from":1753776000000,"to":1753779600000}'
 ```
 
-CES API 的语义字段和约束已经由官方文档确定。这里需要通过实际 MCP
-`inputSchema` 确认的是 Gateway 如何包装 `project_id`、请求 body、region 和其他
-调用参数，而不是重新定义 CES API schema。
+示例中的区域、项目、指标、维度值、时间范围和 period 仅展示命令结构。生产调用时
+全部由当前 `MetricAnalysisSpec` 生成，只有 `filter` 由分析能力固定为 `average`。
 
 #### 5.5.2 Adapter 映射
 
@@ -596,10 +599,10 @@ CES API 的语义字段和约束已经由官方文档确定。这里需要通过
 ```text
 内部 ces_query
 -> 映射为 CES tool 的 MCP inputSchema
--> 构造 cli-anything-huaweicloud-mcp argv
+-> 构造 huaweicloud-mcp argv
 -> subprocess 捕获完整 stdout
--> 解析 CLI envelope
--> 提取 CES response
+-> 校验 CLI envelope
+-> 从唯一的 result 提取 CES response
 -> 交给 DatasetStore
 ```
 
@@ -609,16 +612,17 @@ CES API 的语义字段和约束已经由官方文档确定。这里需要通过
 
 ```text
 [
-  "cli-anything-huaweicloud-mcp",
-  "--json",
+  "huaweicloud-mcp",
   "call",
-  "<tool-name>",
+  "ces_BatchListMetricData",
   "--args",
   "<compact-json>"
 ]
 ```
 
-内部 `ces_query` 当前暂按扁平对象映射为 `region`、`project_id`、`metrics`、`from`、`to`、`period` 和 `filter`。其中 `period` 按 CES API schema 转成字符串。该字段包装必须在 CES tool 注册后通过真实 MCP `inputSchema` 校验；如 Gateway 采用嵌套 body，只修改参数映射，不修改 Skill、`MetricAnalysisSpec`、缓存或算法模块。
+内部 `ces_query` 按真实命令要求映射为 `region`、`project_id`、`metrics`、`period`、
+`filter`、`from` 和 `to`。其中 `period` 转成字符串；其他值保持
+`MetricAnalysisSpec` 规范化后的类型和内容。
 
 #### 5.5.3 大结果处理
 
@@ -633,19 +637,111 @@ CLI 没有 `--output` 不代表必须让数据经过 Hermes terminal：
 
 #### 5.5.4 CLI 返回结构
 
-`huaweicloud-cli` 的 JSON 输出 envelope 包含：
+真实 `huaweicloud-mcp` 成功返回是一个 CLI envelope：
 
-```text
-tool
-arguments
-content
-result
-content_count
+```json
+{
+  "tool": "ces_BatchListMetricData",
+  "arguments": {
+    "region": "cn-north-7",
+    "project_id": "06ce852b5d00d27f2f4bc009e650e95e",
+    "metrics": [
+      {
+        "namespace": "SYS.RDS",
+        "metric_name": "rds001_cpu_util",
+        "dimensions": [
+          {
+            "name": "rds_cluster_id",
+            "value": "32804075f7f14481a8fe9cd4b0e5c883in01"
+          }
+        ]
+      }
+    ],
+    "from": 1784706014452,
+    "to": 1784706064452,
+    "period": "300",
+    "filter": "average"
+  },
+  "content": [
+    {
+      "metrics": [
+        {
+          "namespace": "SYS.RDS",
+          "metric_name": "rds001_cpu_util",
+          "dimensions": [
+            {
+              "name": "rds_cluster_id",
+              "value": "32804075f7f14481a8fe9cd4b0e5c883in01"
+            }
+          ],
+          "datapoints": [
+            {
+              "average": 97.41,
+              "timestamp": 1784706000000
+            }
+          ],
+          "unit": "%"
+        }
+      ],
+      "trace_id": "f67505ee57114e4aaa2405db0750736f"
+    }
+  ],
+  "result": {
+    "metrics": [
+      {
+        "namespace": "SYS.RDS",
+        "metric_name": "rds001_cpu_util",
+        "dimensions": [
+          {
+            "name": "rds_cluster_id",
+            "value": "32804075f7f14481a8fe9cd4b0e5c883in01"
+          }
+        ],
+        "datapoints": [
+          {
+            "average": 97.41,
+            "timestamp": 1784706000000
+          }
+        ],
+        "unit": "%"
+      }
+    ],
+    "trace_id": "f67505ee57114e4aaa2405db0750736f"
+  },
+  "content_count": 1
+}
 ```
 
-当 MCP 返回单个 content 时，`result` 指向解析后的第一个 content。Adapter 应从 `result`、`content` 或其内部响应字段提取包含 `metrics` 的 CES JSON。
+字段和处理规则：
 
-若 CLI 退出码非 0、超时、返回空内容或返回非 JSON，统一转换为 `data_fetch_failed`。
+| 字段 | 含义 | Adapter 行为 |
+| --- | --- | --- |
+| `tool` | 实际调用的 MCP tool 名称 | 必须等于 `ces_BatchListMetricData` |
+| `arguments` | MCP CLI 实际接收的参数 | 必须是 JSON 对象 |
+| `content` | MCP content 项数组 | 必须只有一项 |
+| `result` | `content` 只有一项时生成的便捷结果 | 必须是对象且等于 `content[0]` |
+| `content_count` | `content` 项数量 | 必须等于 `content` 长度且为 `1` |
+| `result.metrics` | CES 指标数据 | 必须是数组，交给 DatasetStore 规范化 |
+| `result.trace_id` | CES 请求追踪 ID | 保留在 CES 原始业务响应中，不进入 `AnalysisResult` |
+
+Adapter 只向 DatasetStore 返回 `result`，不返回整个 CLI envelope。这样
+`raw_response.json` 保存 CES 业务响应及 `trace_id`，而 `tool`、`arguments`、
+`content` 和 `content_count` 不进入 dataset 和分析算法。
+
+CLI 失败时的 stdout/stderr 和退出码结构仍需在真实环境补充验证。当前 adapter
+按以下顺序构造 `data_fetch_failed.message`：
+
+```text
+CLI 非零退出
+-> stdout 是 JSON 且包含字符串 error：使用 error 的前 1000 字符
+-> 否则 stderr 非空：使用 stderr 的前 1000 字符
+-> 否则使用固定文本 no error detail returned
+```
+
+启动失败时，message 包含 Python `OSError` 文本；超时、空 stdout 和非 JSON
+stdout 分别使用对应的确定性错误说明。当前实现没有对这些
+`data_fetch_failed.message` 再做统一敏感信息过滤，因此依赖 MCP CLI 不在错误
+输出中打印 AK/SK 等凭证。
 
 ### 5.6 DatasetStore
 
@@ -668,7 +764,7 @@ ces_<microsecond-timestamp>_<cache-key-suffix>_<random-suffix>/
 
 | 文件 | 内容 |
 | --- | --- |
-| `raw_response.json` | MCP/CES 原始 JSON，供排障和重新解析 |
+| `raw_response.json` | CLI envelope 中的 CES `result`，包括 `metrics` 和 `trace_id`，供排障和重新解析 |
 | `data.jsonl` | 规范化后的 `{metric_name,timestamp,value}` |
 | `metadata.json` | dataset_id、来源、点数、指标数、sha256 和版本 |
 
@@ -1167,12 +1263,12 @@ window_size = points // 2 * 2 + 1
 
 ### 5.9 错误处理
 
-| 错误码 | 场景 | 处理 |
+| 错误码 | 当前代码中的场景 | 当前输出行为 |
 | --- | --- | --- |
-| `invalid_request` | 缺少字段、值类型错误、无可用 datapoints、profile 不支持，或趋势预测历史跨度不足 7 天 | 修正请求，不自动重试 |
-| `query_too_large` | 指标数或估算数据点超限 | 增大 period 或拆分时间/指标 |
-| `data_fetch_failed` | MCP CLI 启动、超时、退出码、空输出或 JSON 解析失败 | 检查 CLI、Gateway、凭证和 CES tool |
-| `internal_error` | 未归类异常 | 返回固定通用消息，不向 LLM 暴露异常类型、路径或后端细节 |
+| `invalid_request` | 缺少字段、值类型错误、请求体超过 512KB、period 或时间范围非法、无可用 datapoints、profile 不支持，或趋势预测历史跨度不足 7 天 | 返回具体校验消息；部分 CES 限制错误附带大小字段 |
+| `query_too_large` | 指标数超过 500，或估算数据点超过 3000 | 返回超限消息；数据点超限时附带估算值、上限和拆分建议 |
+| `data_fetch_failed` | MCP CLI 配置、启动、超时、退出码、空输出、JSON/envelope 解析失败，或 datapoint 缺少 `average` | 返回 adapter 构造的失败消息；其中部分分支包含最多 1000 字符的 CLI/OSError 诊断文本 |
+| `internal_error` | 缓存锁超时、Prophet 依赖/执行失败，或其他未归类异常 | 统一返回固定消息 `Metric analysis failed unexpectedly`，不暴露原异常 |
 
 错误结果字段：
 
@@ -1180,7 +1276,7 @@ window_size = points // 2 * 2 + 1
 | --- | --- | --- | --- | --- |
 | `success` | 执行是否成功 | Boolean | 是 | 错误结果固定为 `false` |
 | `error` | 错误码 | String | 是 | 供 LLM 或上层 Skill 选择修正、拆分或停止等处理分支 |
-| `message` | 错误说明 | String | 是 | 面向调用方的稳定错误描述，不包含未处理异常详情 |
+| `message` | 错误说明 | String | 是 | 校验错误使用确定性文本；`internal_error` 使用固定脱敏文本；`data_fetch_failed` 可能包含受长度限制的后端诊断文本 |
 | `request_bytes` | 请求体字节数 | Integer | 否 | 仅请求超过 512KB 时返回，表示实际序列化大小 |
 | `limit_bytes` | 请求体字节上限 | Integer | 否 | 仅请求超过 512KB 时返回，当前为 `524288` |
 | `estimated_datapoints` | 估算数据点数 | Integer | 否 | 仅超过 CES 数据点限制时返回 |
@@ -1190,7 +1286,12 @@ window_size = points // 2 * 2 + 1
 | `suggestion.split_by_metric` | 是否建议按指标拆分 | Boolean | 条件必填 | 多指标内部查询时指示是否可按指标拆分 |
 | `suggestion.split_by_time` | 是否建议按时间拆分 | Boolean | 条件必填 | 为 `true` 时可缩短或分段查询时间窗口 |
 
-统一错误结构：
+当前错误结果没有 `retryable`、`action` 或统一的 `details` 字段。除
+`success/error/message` 外，只有上表所列的 CES 限制字段可能出现在顶层。
+`MetricAnalysisError.extra` 也会原样合并到错误结果，但当前业务代码没有定义其他
+稳定的 extra 字段。
+
+最小错误结构：
 
 ```json
 {
@@ -1200,7 +1301,12 @@ window_size = points // 2 * 2 + 1
 }
 ```
 
-错误结果不包含原始 CLI stdout、AK/SK、完整请求签名或未处理异常详情。
+`analyze` 子命令在 `success=true` 时退出码为 `0`，在任何结构化错误结果下退出码
+为 `1`。调用方应先解析 stdout JSON，再根据 `success` 和 `error` 判断结果。
+
+当前实现不会返回完整 CLI stdout 或完整请求签名。`internal_error` 不包含未处理
+异常详情；`data_fetch_failed` 可能包含截断后的 CLI `error`、stderr 或
+`OSError` 文本，尚未执行独立的 AK/SK 脱敏过滤。
 
 ## 6. 具体实现细节
 
@@ -1320,11 +1426,15 @@ mysql diagnose
 - normalization/backend version。
 - MCP CLI 超时时间。
 - 缓存 TTL、容量和条目数。
-- MCP CLI Adapter 命令前缀。
+- MCP CLI executable 默认值 `huaweicloud-mcp`。
 
-非密钥配置不通过 `.env` 传递。AK/SK 由 `huaweicloud-cli` 的 akid 凭证链解析。
+非密钥配置不通过 `.env` 传递。MCP Server 地址和认证信息由
+`huaweicloud-mcp` 的部署环境管理，不进入 `MetricAnalysisSpec`。
 
-MCP CLI 命令只集中在 adapter 内部，不进入 `MetricAnalysisSpec`。CES tool 注册后，应将真实 tool 名称放在受控的 adapter 配置或常量中，并依据 tool 的真实 `inputSchema` 校验 `_mcp_tool_arguments` 映射。
+MCP CLI 命令只集中在 adapter 内部，不进入 `MetricAnalysisSpec`。CLI executable
+默认值 `huaweicloud-mcp` 和真实 tool 名称 `ces_BatchListMetricData` 保存在
+adapter 常量中；`call` 和 `--args` 由 `render_command` 固定组装，调用参数统一由
+`_mcp_tool_arguments` 从规范化后的 `ces_query` 生成。
 
 ### 6.4 安全与可观测性
 
@@ -1361,14 +1471,15 @@ error code
 - cache hit、TTL 过期、文件缺失、sha256 错误、受管路径删除和 LRU 淘汰。
 - 相同 cache key 的并发 miss 只调用一次 CES，dataset 和原子临时文件名不冲突。
 - DatasetStore 写入、读取和指标排序。
-- CLI envelope 与 CES response 解析。
-- 五个 profile 的参数和算法边界，包括真实时间戳回归和短序列拒绝。
+- CLI JSON 包装与 CES response 解析。
+- 五个 profile 的参数和算法边界，包括 Prophet 七天历史校验和 168 小时预测。
 - `MetricAnalysisService` 在 fake fetcher 下的缓存复用。
 
 ### 7.2 集成测试
 
-- 使用 fake MCP CLI 返回与真实 `huaweicloud-cli --json call` 一致的 envelope。
-- 验证 adapter 将 `MetricAnalysisSpec` 映射为已注册 CES tool 的 `inputSchema`。
+- 使用真实成功样例验证 CLI envelope，并确认 adapter 返回完整 `result` 和
+  `trace_id`。
+- 验证 adapter 将 `MetricAnalysisSpec` 映射为 `ces_BatchListMetricData` 的真实参数。
 - 同一 CES 查询使用不同 profile 时只复用 dataset，不复用分析结果。
 - CLI stdout 只包含紧凑 `AnalysisResult` 白名单字段。
 - 接近 3000 datapoints 的响应完整写入 DatasetStore，不进入 LLM 上下文。
@@ -1383,21 +1494,20 @@ error code
 - 缓存只复用 dataset，切换 profile 会重新执行算法。
 - 同一查询的并发 miss 被合并，缓存容量按 dataset 全部文件计算。
 - 文档中的 CLI、字段、默认值和错误码与代码一致。
-- CES tool 注册完成后，可通过真实 schema 和 fake/集成测试验证 adapter。
+- `huaweicloud-mcp` 可执行文件和 MCP Server 可用时，真实 CES 调用能够完成；其
+  返回解析在真实环境测试后单独验收。
 
 ## 8. 交付步骤
 
 1. 保持现有 `MetricAnalysisSpec`、DatasetStore、缓存和五个 profile。
-2. 按官方 `BatchListMetricData` schema 在 MCP Gateway 注册 CES tool。
-3. 通过 `tools schema` 获取真实 tool 名称和 MCP `inputSchema` 包装。
-4. 依据真实 `inputSchema` 校正 `McpCliCesFetcher` 的 tool 参数包装；CLI 命令形态保持 `cli-anything-huaweicloud-mcp --json call`。
-5. 增加真实 CLI envelope 的 adapter 测试。
-6. 在可用环境执行 CES 集成测试。
-7. 验证大结果只在内部捕获和落盘，外层只返回 `AnalysisResult`。
+2. 在部署环境安装并配置 `huaweicloud-mcp`。
+3. 确认 MCP Server 已提供 `ces_BatchListMetricData`。
+4. 执行真实 CES 集成测试，验证动态参数，并补充采集失败输出样例。
+5. 验证接近 3000 个 datapoints 的结果只在内部捕获和落盘，外层只返回
+   `AnalysisResult`。
 
 ## 9. 待确认事项
 
-- CES tool 注册后的真实名称。
-- MCP Gateway 如何把已知 CES API schema 包装为 tool `inputSchema`，以及它与 `ces_query` 的字段映射。
-- CES MCP 返回在 `result/content` 中的最终嵌套结构。
+- 部署环境中 `huaweicloud-mcp` 的 MCP Server 地址与认证配置方式。
+- `huaweicloud-mcp` 失败时的 stdout/stderr schema 和退出码。
 - `sha256` 是否继续作为最终 cache key hash 算法。
