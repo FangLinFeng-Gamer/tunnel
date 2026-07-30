@@ -257,7 +257,21 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
 
 `data_fetch_failed` 表示内部 MCP CLI adapter 或后端命令执行失败。
 
-`invalid_request` 表示 `MetricAnalysisSpec` 缺少必填字段或包含不支持的值。
+`missing_required_input` 表示一个或多个必填字段缺失。该错误会在一次响应中返回全部缺失字段，不得触发自动重试：
+
+```json
+{
+  "success": false,
+  "error": "missing_required_input",
+  "message": "Missing required inputs: project_id, time_window.to. Collect all missing values before retrying.",
+  "missing_fields": ["project_id", "time_window.to"],
+  "retryable": false
+}
+```
+
+调用方先从可信上下文补充 `missing_fields`，再一次性向用户询问所有仍无法确定的值。缺少 `time_window.from` 或 `time_window.to` 时，应询问自然语言时间范围，不得要求用户提供毫秒时间戳。
+
+`invalid_request` 表示已经提供的 `MetricAnalysisSpec` 字段存在类型、取值、组合错误或不支持的参数。
 
 `internal_error` 使用固定通用消息，不向 LLM 暴露异常类型、路径或后端细节。
 

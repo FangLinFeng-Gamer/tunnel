@@ -11,12 +11,13 @@ Use this skill to turn one cloud metric query into compact diagnostic evidence. 
 
 1. Confirm that the task needs time-series judgment rather than a current-value lookup.
 2. Choose the profile that matches the diagnostic question.
-3. Collect resource identifiers, a natural-language time range, and the remaining inputs from the user or trusted tool results.
-4. Resolve the user's time range into `time_window.from` and `time_window.to`.
-5. Check the required-input list. If anything is missing, ask once and stop.
-6. Inspect profile help only when its options are unclear.
-7. Run the public CLI exactly once with compact JSON in `--args`.
-8. Branch on `success` or `error`; do not invent another calling convention.
+3. For a database metric, read `references/ces-database-metric-parameters.md` before filling `metric.namespace`, `metric.metric_name`, or `metric.dimensions`.
+4. Collect resource identifiers, a natural-language time range, and the remaining inputs from the user or trusted tool results.
+5. Resolve the user's time range into `time_window.from` and `time_window.to`.
+6. Check the required-input list. If anything is missing, ask once and stop.
+7. Inspect profile help only when its options are unclear.
+8. Run the public CLI exactly once with compact JSON in `--args`.
+9. Branch on `success` or `error`; do not invent another calling convention.
 
 ## Required Inputs
 
@@ -64,7 +65,24 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 
 ## Run
 
-After replacing every field with a concrete value, serialize one `MetricAnalysisSpec` object as compact JSON:
+Build exactly this object shape. The placeholders show structure only; never submit them:
+
+```json
+{
+  "region": "<region>",
+  "project_id": "<project-id>",
+  "metric": {
+    "namespace": "<namespace>",
+    "metric_name": "<metric-name>",
+    "dimensions": [{"name": "<dimension-name>", "value": "<dimension-value>"}]
+  },
+  "time_window": {"from": <resolved-ms>, "to": <resolved-ms>},
+  "period": <period-seconds>,
+  "analysis": {"profile": "<profile-name>"}
+}
+```
+
+Add only documented options for the selected profile under `analysis`. After replacing every placeholder with a concrete value, serialize the object as compact JSON:
 
 ```bash
 python3 scripts/analyze_metric_timeseries.py \
@@ -76,7 +94,7 @@ python3 scripts/analyze_metric_timeseries.py \
 ## Handle Results
 
 - `success=true`: use `summary`, `findings`, and optional `statistics` or `forecast` as diagnostic evidence.
-- `invalid_request` for missing input: ask for all missing values together and stop; do not guess and retry.
+- `missing_required_input`: read the complete `missing_fields` list. Resolve fields from trusted context first, then ask the user for every still-unresolved value in one clarification. Because `retryable=false`, stop and do not call the script again until all values are available.
 - Other `invalid_request`: report the rejected field or option from `message`.
 - `query_too_large`: increase `period` or split the query by time; preserve the user's diagnostic intent.
 - `data_fetch_failed`: stop and report that the internal CES MCP CLI adapter failed.
@@ -95,6 +113,8 @@ Never include raw datapoints in prompts, tool results, or final answers.
 - Do not probe alternative Python imports, class names, subcommands, or parameter styles after a failure.
 
 ## References
+
+For a Huawei Cloud database metric, read `references/ces-database-metric-parameters.md` before selecting the namespace, exact metric ID, dimension keys, or dimension order.
 
 Read `references/analysis-contract.md` only when:
 

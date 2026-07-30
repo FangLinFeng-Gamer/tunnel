@@ -257,7 +257,21 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
 
 `data_fetch_failed` means the internal MCP CLI adapter or backend command failed.
 
-`invalid_request` means the `MetricAnalysisSpec` is missing required fields or contains unsupported values.
+`missing_required_input` means one or more required fields are absent. It returns every absent field in one response and must not trigger an automatic retry:
+
+```json
+{
+  "success": false,
+  "error": "missing_required_input",
+  "message": "Missing required inputs: project_id, time_window.to. Collect all missing values before retrying.",
+  "missing_fields": ["project_id", "time_window.to"],
+  "retryable": false
+}
+```
+
+The caller first resolves `missing_fields` from trusted context, then asks the user for every unresolved value in one clarification. A missing `time_window.from` or `time_window.to` means the caller should ask for a natural-language time range, not millisecond timestamps.
+
+`invalid_request` means a supplied `MetricAnalysisSpec` field has an invalid type, value, combination, or unsupported option.
 
 `internal_error` uses a fixed generic message and does not expose exception types, paths, or backend details.
 

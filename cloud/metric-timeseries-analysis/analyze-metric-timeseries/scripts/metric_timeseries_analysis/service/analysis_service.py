@@ -12,7 +12,10 @@ from metric_timeseries_analysis.ces.fetcher import CesFetcher
 from metric_timeseries_analysis.ces.limits import validate_ces_limits
 from metric_timeseries_analysis.ces.mcp_cli_fetcher import McpCliCesFetcher
 from metric_timeseries_analysis.contracts.result import build_result
-from metric_timeseries_analysis.contracts.spec import normalize_metric_analysis_spec
+from metric_timeseries_analysis.contracts.spec import (
+    find_missing_required_fields,
+    normalize_metric_analysis_spec,
+)
 from metric_timeseries_analysis.errors import MetricAnalysisError
 
 
@@ -22,6 +25,20 @@ class MetricAnalysisService:
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
+            missing_fields = find_missing_required_fields(payload)
+            if missing_fields:
+                fields = ", ".join(missing_fields)
+                return {
+                    "success": False,
+                    "error": "missing_required_input",
+                    "message": (
+                        f"Missing required inputs: {fields}. "
+                        "Collect all missing values before retrying."
+                    ),
+                    "missing_fields": missing_fields,
+                    "retryable": False,
+                }
+
             spec = normalize_metric_analysis_spec(payload)
             limit_error = validate_ces_limits(spec)
             if limit_error:

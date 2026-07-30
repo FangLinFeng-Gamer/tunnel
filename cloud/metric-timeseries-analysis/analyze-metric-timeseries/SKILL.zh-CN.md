@@ -11,12 +11,13 @@ description: 分析数据库和云服务诊断中的云监控指标时序数据�
 
 1. 确认任务需要时序判断，而不是只查询当前值。
 2. 根据诊断问题选择 profile。
-3. 从用户输入或可信 tool 结果中收集资源标识、自然语言时间范围和其他输入。
-4. 将用户时间范围解析为 `time_window.from` 和 `time_window.to`。
-5. 按必填清单检查；存在缺失时，一次询问后停止。
-6. 只有不清楚所选 profile 参数时才查看其帮助。
-7. 将紧凑 JSON 放入 `--args`，按公开 CLI 准确调用一次。
-8. 根据 `success` 或 `error` 分支处理，不得发明其他调用形式。
+3. 对数据库指标，填写 `metric.namespace`、`metric.metric_name` 或 `metric.dimensions` 前，先阅读 `references/ces-database-metric-parameters.zh-CN.md`。
+4. 从用户输入或可信 tool 结果中收集资源标识、自然语言时间范围和其他输入。
+5. 将用户时间范围解析为 `time_window.from` 和 `time_window.to`。
+6. 按必填清单检查；存在缺失时，一次询问后停止。
+7. 只有不清楚所选 profile 参数时才查看其帮助。
+8. 将紧凑 JSON 放入 `--args`，按公开 CLI 准确调用一次。
+9. 根据 `success` 或 `error` 分支处理，不得发明其他调用形式。
 
 ## 必填输入
 
@@ -64,7 +65,24 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 
 ## 执行命令
 
-将所有字段替换为明确值后，把一个 `MetricAnalysisSpec` 对象序列化为紧凑 JSON：
+严格按照以下对象结构构造输入。占位符只用于表示结构，不得原样提交：
+
+```json
+{
+  "region": "<region>",
+  "project_id": "<project-id>",
+  "metric": {
+    "namespace": "<namespace>",
+    "metric_name": "<metric-name>",
+    "dimensions": [{"name": "<dimension-name>", "value": "<dimension-value>"}]
+  },
+  "time_window": {"from": <resolved-ms>, "to": <resolved-ms>},
+  "period": <period-seconds>,
+  "analysis": {"profile": "<profile-name>"}
+}
+```
+
+所选 profile 的参数只能添加在 `analysis` 中，且必须是文档中定义的参数。将全部占位符替换为明确值后，把对象序列化为紧凑 JSON：
 
 ```bash
 python3 scripts/analyze_metric_timeseries.py \
@@ -76,7 +94,7 @@ python3 scripts/analyze_metric_timeseries.py \
 ## 处理结果
 
 - `success=true`：使用 `summary`、`findings` 以及可选的 `statistics` 或 `forecast` 作为诊断证据。
-- `invalid_request` 且输入缺失：一次性询问所有缺失值并停止，不得猜值重试。
+- `missing_required_input`：读取完整的 `missing_fields` 列表。先从可信上下文补充字段，再一次性向用户询问所有仍无法确定的值。因为 `retryable=false`，在全部字段就绪前必须停止，不得再次调用脚本。
 - 其他 `invalid_request`：根据 `message` 报告被拒绝的字段或参数。
 - `query_too_large`：提高 `period` 或按时间拆分查询，同时保持用户的诊断意图。
 - `data_fetch_failed`：停止并报告内部 CES MCP CLI 适配失败。
@@ -95,6 +113,8 @@ python3 scripts/analyze_metric_timeseries.py \
 - 失败后不要试探其他 Python import、类名、子命令或参数传递方式。
 
 ## 参考资料
+
+对于华为云数据库指标，在选择 namespace、准确指标 ID、维度 key 或维度顺序前，阅读 `references/ces-database-metric-parameters.zh-CN.md`。
 
 仅在以下情况读取 `references/analysis-contract.zh-CN.md`：
 

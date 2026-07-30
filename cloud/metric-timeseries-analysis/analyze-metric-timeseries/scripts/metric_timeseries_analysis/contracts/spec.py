@@ -19,6 +19,73 @@ _CES_NAMESPACE_PATTERN = re.compile(
 )
 
 
+def find_missing_required_fields(args: dict[str, Any]) -> list[str]:
+    """Return every absent required field without validating supplied values."""
+    missing: list[str] = []
+    _append_if_missing(missing, "region", args.get("region"))
+    _append_if_missing(missing, "project_id", args.get("project_id"))
+
+    metric = args.get("metric")
+    if metric is None:
+        missing.extend(
+            (
+                "metric.namespace",
+                "metric.metric_name",
+                "metric.dimensions",
+            )
+        )
+    elif isinstance(metric, dict):
+        _append_if_missing(missing, "metric.namespace", metric.get("namespace"))
+        _append_if_missing(
+            missing,
+            "metric.metric_name",
+            metric.get("metric_name") or metric.get("name"),
+        )
+        dimensions = metric.get("dimensions")
+        if _is_missing(dimensions):
+            missing.append("metric.dimensions")
+        elif isinstance(dimensions, list):
+            for index, dimension in enumerate(dimensions):
+                if not isinstance(dimension, dict):
+                    continue
+                _append_if_missing(
+                    missing,
+                    f"metric.dimensions[{index}].name",
+                    dimension.get("name"),
+                )
+                _append_if_missing(
+                    missing,
+                    f"metric.dimensions[{index}].value",
+                    dimension.get("value"),
+                )
+
+    window = args.get("time_window")
+    if window is None:
+        missing.extend(("time_window.from", "time_window.to"))
+    elif isinstance(window, dict):
+        _append_if_missing(missing, "time_window.from", window.get("from"))
+        _append_if_missing(missing, "time_window.to", window.get("to"))
+
+    _append_if_missing(missing, "period", args.get("period"))
+
+    analysis = args.get("analysis")
+    if analysis is None:
+        missing.append("analysis.profile")
+    elif isinstance(analysis, dict):
+        profile = analysis.get("profile")
+        _append_if_missing(missing, "analysis.profile", profile)
+        if isinstance(profile, str) and profile in PROFILE_DEFINITIONS:
+            for option in PROFILE_DEFINITIONS[profile].options:
+                if option.required:
+                    _append_if_missing(
+                        missing,
+                        f"analysis.{option.name}",
+                        analysis.get(option.name),
+                    )
+
+    return missing
+
+
 def normalize_metric_analysis_spec(args: dict[str, Any]) -> dict[str, Any]:
     metric = _require_object(args.get("metric"), "metric")
     window = _require_object(args.get("time_window"), "time_window")
@@ -72,6 +139,17 @@ def normalize_metric_analysis_spec(args: dict[str, Any]) -> dict[str, Any]:
         "analysis": normalized_analysis,
         "ces_query": ces_query,
     }
+
+
+def _append_if_missing(missing: list[str], field: str, value: Any) -> None:
+    if _is_missing(value):
+        missing.append(field)
+
+
+def _is_missing(value: Any) -> bool:
+    return value is None or value == [] or (
+        isinstance(value, str) and not value.strip()
+    )
 
 
 def _require_object(value: Any, field: str) -> dict[str, Any]:
