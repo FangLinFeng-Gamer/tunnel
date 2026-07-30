@@ -14,15 +14,31 @@ from metric_timeseries_analysis.service.analysis_service import MetricAnalysisSe
 
 
 def main(argv: list[str] | None = None) -> int:
+    verbose_parent = argparse.ArgumentParser(add_help=False)
+    verbose_parent.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)
+
     parser = argparse.ArgumentParser(description="Analyze cloud metric time-series data.")
+    parser.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    analyze = subparsers.add_parser("analyze", help="Analyze a metric using a MetricAnalysisSpec.")
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="Analyze a metric using a MetricAnalysisSpec.",
+        parents=[verbose_parent],
+    )
     analyze.add_argument("--args", "-a", required=True, help="MetricAnalysisSpec as a JSON string.")
 
-    subparsers.add_parser("profiles", help="List supported analysis profiles.")
+    subparsers.add_parser(
+        "profiles",
+        help="List supported analysis profiles.",
+        parents=[verbose_parent],
+    )
 
-    profile = subparsers.add_parser("profile", help="Show parameters for one analysis profile.")
+    profile = subparsers.add_parser(
+        "profile",
+        help="Show parameters for one analysis profile.",
+        parents=[verbose_parent],
+    )
     profile_subparsers = profile.add_subparsers(dest="profile_name", required=True)
     for profile_name in list_profile_names():
         definition = get_profile_definition(profile_name)
@@ -31,6 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             help=definition.summary,
             description=f"{definition.summary}\n\n{definition.use_for}",
             formatter_class=argparse.RawTextHelpFormatter,
+            parents=[verbose_parent],
         )
         profile_parser.set_defaults(profile_name=profile_name)
         for option in definition.options:

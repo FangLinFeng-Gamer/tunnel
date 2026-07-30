@@ -7,6 +7,7 @@ from metric_timeseries_analysis.series.model import MetricSeriesMap
 
 
 def unwrap_mcp_cli_envelope(payload: Any, expected_tool_name: str) -> dict[str, Any]:
+    """Extract the CES business response from a huaweicloud-mcp call envelope."""
     if not isinstance(payload, dict):
         raise MetricAnalysisError("data_fetch_failed", "MCP CLI output must be a JSON object")
 
