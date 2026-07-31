@@ -15,6 +15,9 @@ For `region`, `project_id`, the time window, `period`, and analysis options, use
 The source service list is the Huawei Cloud CES
 [Supported Services](https://support.huaweicloud.com/api-ces/ces_03_0059.html)
 page. Its database category links to each service's current metric catalog.
+For RDS for MySQL, use the bundled
+[metric ID catalog](rds-mysql-metric-catalog.md) to select an exact ID without
+loading the full vendor table.
 
 ## Filling Rules
 
@@ -41,9 +44,9 @@ page. Its database category links to each service's current metric catalog.
 
 | Database service | `metric.namespace` | Dimension guidance | Official metric catalog |
 | --- | --- | --- | --- |
-| RDS for MySQL, single-node or primary/standby | `SYS.RDS` | Common instance metrics use `rds_cluster_id`. | [RDS for MySQL metrics](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html) |
-| RDS for MySQL cluster edition | `SYS.RDS_MYSQL_CLUSTER` | Node metrics commonly use `rds_cluster_id,rds_instance_id`. | [RDS for MySQL metrics](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html) |
-| Database proxy for RDS for MySQL or TaurusDB | `SYS.DBPROXY` | Proxy node metrics use `dbproxy_instance_id,dbproxy_node_id`; verify the selected row. | [RDS for MySQL proxy metrics](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html), [TaurusDB metrics](https://support.huaweicloud.com/usermanual-taurusdb/taurusdb_03_0085.html) |
+| RDS for MySQL, single-node or primary/standby | `SYS.RDS` | Common instance metrics use `rds_cluster_id`. | [Bundled RDS for MySQL metric IDs](rds-mysql-metric-catalog.md) |
+| RDS for MySQL cluster edition | `SYS.RDS_MYSQL_CLUSTER` | Node metrics commonly use `rds_cluster_id,rds_instance_id`. | [Bundled RDS for MySQL metric IDs](rds-mysql-metric-catalog.md) |
+| Database proxy for RDS for MySQL or TaurusDB | `SYS.DBPROXY` | Proxy node metrics use `dbproxy_instance_id,dbproxy_node_id`; verify the selected row. | [Bundled RDS for MySQL proxy metric IDs](rds-mysql-metric-catalog.md), [TaurusDB metrics](https://support.huaweicloud.com/usermanual-taurusdb/taurusdb_03_0085.html) |
 | RDS for MariaDB | `SYS.RDS` | Instance metrics use `mariadb_cluster_id`. | [RDS for MariaDB metrics](https://support.huaweicloud.com/usermanual-rds-mariadb/maria_03_0087.html) |
 | RDS for PostgreSQL | `SYS.RDS` | Instance metrics use `postgresql_cluster_id`. | [RDS for PostgreSQL metrics](https://support.huaweicloud.com/usermanual-rds-pg/rds_pg_06_0001.html) |
 | RDS for SQL Server | `SYS.RDS` | Instance metrics use `rds_cluster_sqlserver_id`. | [RDS for SQL Server metrics](https://support.huaweicloud.com/usermanual-rds-mssql/rds_sqlserver_06_0001.html) |

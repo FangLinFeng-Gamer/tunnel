@@ -116,6 +116,9 @@ python3 scripts/analyze_metric_timeseries.py \
 
 对于华为云数据库指标，在选择 namespace、准确指标 ID、维度 key 或维度顺序前，阅读 `references/ces-database-metric-parameters.zh-CN.md`。
 
+对于 RDS for MySQL 实例或数据库代理指标，阅读
+`references/rds-mysql-metric-catalog.zh-CN.md`，将官方指标名称映射为准确指标 ID。
+
 仅在以下情况读取 `references/analysis-contract.zh-CN.md`：
 
 - 需要精确字段约束或 profile 默认参数；

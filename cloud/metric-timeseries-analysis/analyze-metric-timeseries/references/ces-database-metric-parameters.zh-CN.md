@@ -14,6 +14,8 @@ metric.dimensions
 服务范围来自华为云 CES
 [支持监控的服务列表](https://support.huaweicloud.com/api-ces/ces_03_0059.html)
 中的“数据库”分类；该页面链接到各数据库服务当前的监控指标文档。
+对于 RDS for MySQL，使用内置的
+[指标 ID 目录](rds-mysql-metric-catalog.zh-CN.md)选择准确指标，无需加载完整厂商表格。
 
 ## 填写规则
 
@@ -34,9 +36,9 @@ metric.dimensions
 
 | 数据库服务 | `metric.namespace` | 维度填写说明 | 官方监控指标文档 |
 | --- | --- | --- | --- |
-| RDS for MySQL 单机或主备实例 | `SYS.RDS` | 常见实例指标使用 `rds_cluster_id`。 | [RDS for MySQL](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html) |
-| RDS for MySQL 集群版 | `SYS.RDS_MYSQL_CLUSTER` | 节点指标通常使用 `rds_cluster_id,rds_instance_id`。 | [RDS for MySQL](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html) |
-| RDS for MySQL 或 TaurusDB 数据库代理 | `SYS.DBPROXY` | 代理节点指标使用 `dbproxy_instance_id,dbproxy_node_id`，仍须核对指标行。 | [RDS for MySQL 数据库代理](https://support.huaweicloud.com/usermanual-rds-mysql/rds_06_0001.html)、[TaurusDB](https://support.huaweicloud.com/usermanual-taurusdb/taurusdb_03_0085.html) |
+| RDS for MySQL 单机或主备实例 | `SYS.RDS` | 常见实例指标使用 `rds_cluster_id`。 | [内置 RDS for MySQL 指标 ID](rds-mysql-metric-catalog.zh-CN.md) |
+| RDS for MySQL 集群版 | `SYS.RDS_MYSQL_CLUSTER` | 节点指标通常使用 `rds_cluster_id,rds_instance_id`。 | [内置 RDS for MySQL 指标 ID](rds-mysql-metric-catalog.zh-CN.md) |
+| RDS for MySQL 或 TaurusDB 数据库代理 | `SYS.DBPROXY` | 代理节点指标使用 `dbproxy_instance_id,dbproxy_node_id`，仍须核对指标行。 | [内置 RDS for MySQL 代理指标 ID](rds-mysql-metric-catalog.zh-CN.md)、[TaurusDB](https://support.huaweicloud.com/usermanual-taurusdb/taurusdb_03_0085.html) |
 | RDS for MariaDB | `SYS.RDS` | 实例指标使用 `mariadb_cluster_id`。 | [RDS for MariaDB](https://support.huaweicloud.com/usermanual-rds-mariadb/maria_03_0087.html) |
 | RDS for PostgreSQL | `SYS.RDS` | 实例指标使用 `postgresql_cluster_id`。 | [RDS for PostgreSQL](https://support.huaweicloud.com/usermanual-rds-pg/rds_pg_06_0001.html) |
 | RDS for SQL Server | `SYS.RDS` | 实例指标使用 `rds_cluster_sqlserver_id`。 | [RDS for SQL Server](https://support.huaweicloud.com/usermanual-rds-mssql/rds_sqlserver_06_0001.html) |

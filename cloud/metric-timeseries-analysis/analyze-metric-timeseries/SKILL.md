@@ -116,6 +116,10 @@ Never include raw datapoints in prompts, tool results, or final answers.
 
 For a Huawei Cloud database metric, read `references/ces-database-metric-parameters.md` before selecting the namespace, exact metric ID, dimension keys, or dimension order.
 
+For an RDS for MySQL instance or database proxy metric, read
+`references/rds-mysql-metric-catalog.md` to map the official metric name to the
+exact metric ID.
+
 Read `references/analysis-contract.md` only when:
 
 - exact field constraints or profile defaults are needed;
