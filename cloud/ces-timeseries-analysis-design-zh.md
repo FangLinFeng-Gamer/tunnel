@@ -24,13 +24,14 @@ MySQL 故障诊断为什么使用该能力、如何编排 DAS/RDS/MCP/`query_sql
 因此，对 LLM 和 service-category Skill 只提供高层分析入口。该入口内部完成：
 
 ```text
-规范化请求
--> 校验 CES 查询限制
--> 查询时序数据缓存
--> 缓存未命中时调用 MCP CLI
--> 保存 CES 原始响应和规范化数据
+检查全部必填输入，缺失时一次返回结构化错误
+-> 规范化请求
+-> 将指标名数组展开为单指标 CES 查询
+-> 逐指标查询时序数据缓存
+-> 对缓存未命中的指标按 CES 限制分批调用 MCP CLI
+-> 将批量响应拆分并按单指标保存原始响应和规范化数据
 -> 执行指定分析 profile
--> 返回紧凑 AnalysisResult
+-> 返回紧凑 AnalysisResult 或结构化错误对象
 ```
 
 当前 CES MCP CLI 的实际入口为：
@@ -47,11 +48,12 @@ huaweicloud-mcp
 
 ### 3.1 目标
 
-- 将五类时序分析算法迁移为跨数据库服务复用的能力。
+- 将六类时序分析算法迁移为跨数据库服务复用的能力，包括双指标关联异常分析。
 - 对外只暴露小体积 `MetricAnalysisSpec` 和 `AnalysisResult`。
 - 将 CES 数据获取封装在分析能力内部。
 - 将原始响应和规范化时序数据保存到 DatasetStore。
 - 缓存 CES 时序 dataset，避免同一查询重复拉数。
+- 利用 CES 批量查询能力合并多指标 cache miss，同时保持一个指标一个 cache entry 和 dataset。
 - 允许相同 dataset 被不同 profile 重复分析。
 - 保留 MCP CLI 作为当前获取后端，并允许未来替换为 CES SDK/API。
 - 通过 profile registry 扩展算法，不修改主编排流程。
@@ -95,23 +97,29 @@ flowchart TB
 
     subgraph Capability["通用时序分析能力"]
         CLI["analyze_metric_timeseries.py<br/>analyze --args JSON"]
-        Normalize["Spec 规范化与 CES 限制校验"]
         Service["MetricAnalysisService"]
-        Key["生成 cache key"]
-        Cache{"CES dataset 缓存命中？"}
+        Preflight["必填输入预检<br/>find_missing_required_fields"]
+        Normalize["Spec 规范化<br/>展开单指标 CES 查询"]
+        Resolver["MetricDatasetResolver<br/>逐指标生成 cache key"]
+        Cache{"逐指标 dataset 缓存命中？"}
         Load["DatasetStore 加载 data.jsonl"]
+        Batch["CesBatchPlanner<br/>对 miss 按 CES 限制分批"]
         Fetcher["McpCliCesFetcher"]
-        Persist["解析 CES 响应并持久化<br/>raw_response.json / data.jsonl / metadata.json"]
+        Split["按 metric_name 拆分批量响应"]
+        Persist["逐指标持久化<br/>raw_response.json / data.jsonl / metadata.json"]
         Registry["Analysis Registry<br/>选择 profile 并构造强类型 Options"]
         Profile["时序分析 Profile"]
         Result["build_result<br/>生成紧凑 AnalysisResult"]
+        Error["结构化错误对象"]
 
-        CLI --> Normalize --> Service --> Key --> Cache
+        CLI --> Service --> Preflight --> Normalize --> Resolver --> Cache
+        Preflight -->|"存在缺失字段"| Error
         Cache -->|"命中"| Load
-        Cache -->|"未命中"| Fetcher
+        Cache -->|"未命中"| Batch --> Fetcher
         Load --> Registry
         Persist --> Registry
         Registry --> Profile --> Result
+        Service -. "校验、获取或分析失败" .-> Error
     end
 
     subgraph Cloud["外部数据获取链路"]
@@ -127,18 +135,21 @@ flowchart TB
 
     Runner -->|"启动脚本"| CLI
     Fetcher -->|"subprocess"| McpCli
-    McpCli -->|"原始 JSON，仅在能力内部流转"| Persist
+    McpCli -->|"批量 JSON，仅在能力内部流转"| Split --> Persist
     Persist -. "写入并更新 cache index" .-> Cache
     Result -->|"stdout：AnalysisResult JSON"| Runner
+    Error -->|"stdout：错误 JSON"| Runner
     Runner -->|"terminal/tool result"| Engine
     Engine -->|"结合 DAS、RDS、query_sql 等证据"| User
 ```
 
 图中的实线表示运行时调用或数据流，虚线表示 Skill 指导关系或缓存索引更新。
+原单指标 cache 子流程可简写为 `CLI --> Service --> Preflight --> Normalize --> Key --> Cache`；
+当前实现由 `MetricDatasetResolver` 对指标数组中的每个元素执行该子流程。
 `service-category` Skill 不直接调用 CES，也不在多个 tool 之间传递 datapoints；它只让
 Agent 按时序分析 Skill 的契约构造 `MetricAnalysisSpec`。CES 原始响应、规范化时序、
 dataset 路径和缓存元数据均停留在通用时序分析能力内部，跨边界返回的只有紧凑
-`AnalysisResult`。
+`AnalysisResult` 或结构化错误对象。
 
 ### 4.2 能力边界
 
@@ -161,29 +172,32 @@ dataset 路径和缓存元数据均停留在通用时序分析能力内部，跨
 
 ```text
 1. CLI 从 `--args` 解析 MetricAnalysisSpec JSON 对象字符串。
-2. normalize_metric_analysis_spec 校验并生成内部 ces_query。
-3. validate_ces_limits 校验 metrics、period、时间范围和数据点上限。
-4. cache_key_for 对 canonical ces_query 计算 cache key。
-5. 获取该 cache key 的文件系统锁，合并相同查询的并发 miss。
-6. cache_get 校验 index、TTL、dataset 文件和 sha256。
-7. 缓存命中时从 DatasetStore 加载规范化数据。
-8. 缓存未命中时由 CesFetcher 调用 MCP CLI，并解析 CES 返回。
-9. persist_dataset 保存 raw_response.json、data.jsonl 和 metadata.json。
-10. cache_put 写入 cache index，并在超限时执行容量淘汰。
-11. 释放 cache key 锁。
-12. service 根据 period 构造 AnalysisContext。
-13. registry 根据 analysis.profile 将 JSON 参数转换为对应的不可变 Options。
-14. profile 只接收 series_by_metric、AnalysisContext 和专属 Options 执行算法。
-15. build_result 生成紧凑 AnalysisResult。
-16. CLI 只向 stdout 打印 AnalysisResult。
+2. MetricAnalysisService 调用 find_missing_required_fields 聚合全部缺失字段。
+3. 存在缺失字段时立即返回 missing_required_input，不执行 CES 查询。
+4. normalize_metric_analysis_spec 校验已提供字段，将 metric_name 数组展开为内部 ces_queries。
+5. MetricDatasetResolver 为每个单指标 ces_query 计算 cache key，CesBatchPlanner 在不改变 from/to 的前提下按 500 指标、3000 数据点和 512KB 限制形成锁与查询批次。
+6. 每个批次按 cache key 稳定顺序获取该批涉及的文件系统锁，再由 cache_get 分别校验 index、TTL、dataset 文件和 sha256。
+7. 缓存命中时从对应 DatasetStore 加载规范化数据，只保留该批缺失指标进入拉数流程。
+8. 对该批缺失指标重新规划合法 CES 请求；全命中时不调用 CES。
+9. CesFetcher 对每个仍有 miss 的批次调用 MCP CLI，并解析 CES 返回。
+10. response_splitter 按 metric_name 将批量响应拆成单指标响应。
+11. persist_dataset 为每个指标分别保存 raw_response.json、data.jsonl 和 metadata.json。
+12. cache_put 分别写入单指标 cache index，并在超限时执行容量淘汰。
+13. 当前批次持久化完成后立即释放该批 cache key 锁，继续下一批，最后合并为 series_by_metric。
+14. service 根据 period 构造 AnalysisContext。
+15. registry 根据 analysis.profile 将 JSON 参数转换为对应的不可变 Options。
+16. profile 只接收 series_by_metric、AnalysisContext 和专属 Options 执行算法。
+17. build_result 生成紧凑 AnalysisResult。
+18. CLI 向 stdout 打印一个紧凑 JSON：AnalysisResult 或结构化错误对象。
 ```
 
 ### 4.4 当前实现状态
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
+| 必填输入聚合预检 | 已实现 | `find_missing_required_fields` 一次返回公共字段、嵌套 metric/time_window 字段及所选 profile 必填参数；缺失时不调用 CES |
 | `MetricAnalysisSpec` 规范化 | 已实现 | 按 CES schema 校验必填项、格式、长度、维度数量和时间戳范围；profile 参数严格校验并固定使用 `average` |
-| 五个分析 profile | 已实现 | 已拆分为独立模块并通过 registry 分发 |
+| 六个分析 profile | 已实现 | 五个单指标 profile 和一个双指标关联 profile 已拆分为独立模块并通过 registry 分发 |
 | Profile 强类型参数边界 | 已实现 | 外部保留 `analysis` JSON；内部转换为 `AnalysisContext` 和各 profile 的不可变 Options，算法不接收完整 spec |
 | DatasetStore | 已实现 | 保存 raw JSON、规范化 JSONL 和 metadata |
 | 文件型 CES 缓存 | 已实现 | 支持 TTL 惰性淘汰和写入后容量淘汰 |
@@ -196,6 +210,9 @@ dataset 路径和缓存元数据均停留在通用时序分析能力内部，跨
 | CES tool 名称和 MCP 参数包装 | 已确定 | tool 为 `ces_BatchListMetricData`；参数为扁平的 `region`、`project_id`、`metrics`、`period`、`filter`、`from`、`to` |
 | MCP CLI 成功返回 schema | 已确定 | 外层包含 `tool`、`arguments`、`content`、`result`、`content_count`；CES 业务响应位于唯一的 `result` |
 | 并发 single-flight | 已实现 | 同一 cache key 使用跨进程文件系统锁合并并发 miss |
+| 多指标 CES 批量获取 | 已实现 | 只合并 cache miss；超限时按指标拆批，不缩短单指标时间范围 |
+| 单指标缓存拆分 | 已实现 | CES 批量响应在落盘前按 metric_name 拆分，每个指标独立 cache key 和 dataset |
+| 数据库 CES 参数 reference | 已实现 | 通用分析 Skill 在填写数据库指标 namespace、指标 ID 和 dimensions 前强制查阅独立 reference |
 
 ## 5. 详细功能设计
 
@@ -229,11 +246,11 @@ analysis profile options
   "project_id": "project-xxx",
   "metric": {
     "namespace": "SYS.RDS",
-    "metric_name": "cpu_util",
+    "metric_name": ["rds001_cpu_util"],
     "dimensions": [
       {
-        "name": "instance_id",
-        "value": "rds-xxx"
+        "name": "rds_cluster_id",
+        "value": "32804075f7f14481a8fe9cd4b0e5c883in01"
       }
     ]
   },
@@ -254,9 +271,9 @@ analysis profile options
 | --- | --- | --- | --- | --- | --- |
 | `region` | 云区域 | String | 是 | 分析能力自定义路由字段 | 指定 MCP CLI 调用的华为云区域，例如 `cn-north-4` |
 | `project_id` | 项目 ID | String | 是 | CES | 定义见 CES 接口文档 |
-| `metric` | 指标信息 | Object | 是 | CES `MetricInfo` 的单指标封装 | 描述本次需要查询和分析的一个指标 |
+| `metric` | 指标信息 | Object | 是 | 对共享 CES 指标字段的封装 | 描述本次需要查询和分析的一组同 namespace、同 dimensions 指标 |
 | `metric.namespace` | 指标命名空间 | String | 是 | CES | 定义见 CES 接口文档 |
-| `metric.metric_name` | 指标名称 | String | 是 | CES | 定义见 CES 接口文档 |
+| `metric.metric_name` | 指标名称列表 | Array<String> | 是 | CES | 非空且不重复；数组元素定义见 CES 接口文档 |
 | `metric.dimensions` | 指标维度 | Array<Object> | 是 | CES | 定义见 CES 接口文档；维度名由目标指标文档决定 |
 | `metric.dimensions[].name` | 维度名称 | String | 是 | CES | 定义见 CES 接口文档 |
 | `metric.dimensions[].value` | 维度值 | String | 是 | CES | 定义见 CES 接口文档 |
@@ -275,24 +292,31 @@ analysis profile options
 | `direction` | 阈值比较方向 | String | `sliding_window_threshold_frequency_detection` | `above` | `above` 表示大于等于阈值，`below` 表示小于等于阈值 |
 | `window_points` | 滑动窗口点数 | Integer | `sliding_window_threshold_frequency_detection` | `3` | 每个滑动窗口包含的数据点数量 |
 | `min_frequency` | 最小命中次数 | Integer | `sliding_window_threshold_frequency_detection` | `ceil(window_points / 2)` | 一个窗口至少命中阈值多少次才生成 finding，且不能大于 `window_points` |
-| `box_scale` | 箱线图范围倍数 | Number | `spike_drop_detection` | `3` | 使用 `Q1 - box_scale × IQR` 和 `Q3 + box_scale × IQR` 计算异常上下界 |
-| `direction` | 突变检测方向 | String | `spike_drop_detection` | `up` | `up` 检测突增，`down` 检测突降，`all` 检测两个方向 |
-| `window_size` | 突变检测平滑时长 | Integer | `spike_drop_detection` | `3600` | 均值和中值平滑的时间窗口，单位秒；内部结合有效时间粒度换算为奇数点窗 |
-| `residual_sen` | 残差灵敏度 | Number | `spike_drop_detection` | `10` | 均值平滑残差的极差小于该值时直接判定无异常 |
-| `nonzero` | 非零边界估计 | Boolean | `spike_drop_detection` | `false` | 为 `true` 时，计算箱线图上下界前排除零值 |
+| `box_scale` | 箱线图范围倍数 | Number | `spike_drop_detection`、`coincident_anomaly_detection` | `3` | 使用 `Q1 - box_scale × IQR` 和 `Q3 + box_scale × IQR` 计算异常上下界 |
+| `direction` | 突变检测方向 | String | `spike_drop_detection`、`coincident_anomaly_detection` | `up` | `up` 检测突增，`down` 检测突降，`all` 检测两个方向 |
+| `window_size` | 突变检测平滑时长 | Integer | `spike_drop_detection`、`coincident_anomaly_detection` | `3600` | 均值和中值平滑的时间窗口，单位秒；内部结合有效时间粒度换算为奇数点窗 |
+| `residual_sen` | 残差灵敏度 | Number | `spike_drop_detection`、`coincident_anomaly_detection` | `10` | 均值平滑残差的极差小于该值时直接判定无异常 |
+| `nonzero` | 非零边界估计 | Boolean | `spike_drop_detection`、`coincident_anomaly_detection` | `false` | 为 `true` 时，计算箱线图上下界前排除零值 |
 | `smoothing_time` | 平滑时间 | Integer | `median_p75_statistics` | `900` | 上层可传入的平滑时长，单位秒；省略时默认 15 分钟 |
+| `time_point` | 故障时间点 | Integer | `coincident_anomaly_detection` | 无，必填 | 毫秒时间戳；关联判断窗口的结束时间 |
+| `lookback_seconds` | 故障前回看时长 | Integer | `coincident_anomaly_detection` | `1800` | 检查 `[time_point-lookback_seconds, time_point]` 内两个指标是否都出现异常 |
 
 `rising_trend_detection` 和 `trend_prediction` 没有额外分析参数。
 
 字段规则：
 
 - `project_id` 是 CES API 路径参数，必填，长度为 1 到 64。
-- `time_window.from/to` 使用毫秒时间戳。
+- 用户提供自然语言时间范围；调用 Skill 结合当前时间和时区解析后，写入毫秒时间戳格式的 `time_window.from/to`，不要求用户直接提供时间戳。
 - `metric.dimensions` 遵循 CES `MetricInfo.dimensions`，每项为 `{name, value}`。
+- `metric.metric_name` 必须是非空、不重复的字符串数组；五个单指标 profile 要求恰好一个元素，`coincident_anomaly_detection` 要求恰好两个元素。
+- 指标数组中的所有指标共享 namespace、dimensions、region、project_id、time_window 和 period；需要不同维度的指标必须拆成不同分析请求。
 - `dimensions[].name` 必须使用目标指标文档定义的维度名；`instance_id` 只是示例。
+- 数据库指标的 namespace、准确指标 ID 和维度 key 必须先查阅通用分析 Skill 的
+  `references/ces-database-metric-parameters.zh-CN.md`，不得跨产品类推。
 - dimensions 必须有 1 到 4 项，name 不能重复，name/value 按 CES 长度和格式校验，规范化后按 name 排序。
 - 调用方不传 `filter`；内部 CES 请求固定使用 `average`。
 - `analysis.profile` 必须显式填写，不根据自然语言自动猜测。
+- `coincident_anomaly_detection.time_point` 必须位于 `time_window` 内，且 `time_window.from` 必须覆盖完整回看窗口。
 - profile 只接受目录中声明的参数；类型、枚举、最小值和参数间约束在运行时统一校验。
 - 缓存 TTL 和容量属于服务级策略，不允许通过 `MetricAnalysisSpec` 覆盖。
 
@@ -302,6 +326,12 @@ CES 批量查询指标数据接口参考：
 https://support.huaweicloud.com/api-ces/ces_03_0034.html
 ```
 
+数据库服务目录及其监控指标文档入口参考：
+
+```text
+https://support.huaweicloud.com/api-ces/ces_03_0059.html
+```
+
 ### 5.2 AnalysisResult
 
 成功结果的稳定结构：
@@ -309,7 +339,7 @@ https://support.huaweicloud.com/api-ces/ces_03_0034.html
 ```json
 {
   "success": true,
-  "metric_name": "cpu_util",
+  "metric_name": ["cpu_util"],
   "profile": "trend_prediction",
   "summary": "Forecasted the next seven days with Prophet.",
   "findings": []
@@ -321,7 +351,7 @@ https://support.huaweicloud.com/api-ces/ces_03_0034.html
 | 字段 | 中文含义 | 类型 | 必填 | 作用 |
 | --- | --- | --- | --- | --- |
 | `success` | 执行是否成功 | Boolean | 是 | 成功结果固定为 `true`；调用方据此区分成功和错误结构 |
-| `metric_name` | 指标名称 | String | 是 | 标识本次结论对应的指标；值来自 CES 请求字段，定义见 CES 接口文档 |
+| `metric_name` | 指标名称列表 | Array<String> | 是 | 标识本次结论对应的一个或两个指标；元素定义见 CES 接口文档 |
 | `profile` | 实际执行的分析配置 | String | 是 | 告诉 LLM 本次结果由哪一种分析算法产生 |
 | `summary` | 分析摘要 | String | 是 | 提供可直接用于诊断编排的简短自然语言结论 |
 | `findings` | 结构化发现 | Array<Object> | 是 | 返回算法识别出的事件、趋势或统计证据；没有匹配事件时为空数组 |
@@ -336,9 +366,9 @@ https://support.huaweicloud.com/api-ces/ces_03_0034.html
 
 | 字段 | 中文含义 | 类型 | 必填 | 作用 |
 | --- | --- | --- | --- | --- |
-| `kind` | 发现类型 | String | 是 | 机器可读的结论类型，例如 `spike`、`drop`、`rising_trend` 或 `upward_trend` |
+| `kind` | 发现类型 | String | 是 | 机器可读的结论类型，例如 `spike`、`drop`、`rising_trend`、`upward_trend` 或 `coincident_anomaly` |
 | `severity` | 严重级别 | String | 是 | 当前实现使用 `info` 或 `warning`，供诊断流程区分普通信息和风险信号 |
-| `metric_name` | 指标名称 | String | 是 | 标识该 finding 对应的指标；定义见 CES 接口文档 |
+| `metric_name` | 指标名称 | String 或 Array<String> | 是 | 单指标 finding 为字符串；`coincident_anomaly` 为两个指标名数组 |
 | `confidence` | 置信度 | Number | 是 | 范围 `[0,1]`，表示算法对该 finding 的数值化可信程度，不等同于故障根因概率 |
 | `time_window` | 事件时间窗口 | Object | 否 | 事件检测类 finding 的开始和结束毫秒时间戳 |
 | `time_window.start` | 事件开始时间 | Integer | 条件必填 | 阈值窗口起始时间，或突变异常点时间 |
@@ -354,6 +384,7 @@ https://support.huaweicloud.com/api-ces/ces_03_0034.html
 | `median_p75_statistics` | `distribution_summary` | 分布统计摘要 |
 | `rising_trend_detection` | `rising_trend` / `falling_trend` / `no_clear_trend` | 相邻点变化次数显示上升、下降或无明显方向 |
 | `trend_prediction` | `upward_trend` / `downward_trend` / `flat_trend` | 整体趋势为上升/下降/平稳 |
+| `coincident_anomaly_detection` | `coincident_anomaly` | 两个指标在故障前同一回看窗口内均出现指定方向的异常 |
 
 阈值频次 finding 的 `evidence`：
 
@@ -439,6 +470,7 @@ dataset 文件路径、sha256、bytes
 | `median_p75_statistics` | 先进行中值平滑，再计算中位数和 p75 | `smoothing_time` 默认 900 秒，可由上层覆盖 |
 | `rising_trend_detection` | 比较相邻点上升和下降次数，判断上升、下降或无明显方向 | 无额外参数；少于 2 个数据点时返回数据不足 |
 | `trend_prediction` | 使用 Prophet 预测未来七天的小时级指标趋势 | 无额外参数；历史数据跨度至少为 7 天；固定预测未来 168 小时 |
+| `coincident_anomaly_detection` | 判断两个指标是否都在故障前同一时间窗口发生突增或突降 | 恰好两个指标；`time_point` 必填；`lookback_seconds` 默认 1800 秒；其余参数与突增突降检测一致 |
 
 参数定义的代码事实来源是 `analysis/profile_catalog.py`。调用方通过 CLI 查询，避免文档与实现漂移：
 
@@ -461,6 +493,8 @@ python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analy
 | `name` | 分析配置标识 | String | 可填写到 `analysis.profile` 的值 |
 | `summary` | 能力摘要 | String | 简述该 profile 做什么 |
 | `use_for` | 适用场景 | String | 告诉 LLM 什么时候应选择该 profile |
+| `min_metric_count` | 最少指标数 | Integer | 该 profile 接受的 metric_name 数组最小长度 |
+| `max_metric_count` | 最多指标数 | Integer | 该 profile 接受的 metric_name 数组最大长度 |
 | `options` | 参数定义列表 | Array<Object> | 描述该 profile 接受的全部参数 |
 | `example_analysis` | 分析配置示例 | Object | 可直接作为 `MetricAnalysisSpec.analysis` 的结构参考 |
 
@@ -496,6 +530,10 @@ https://support.huaweicloud.com/api-ces/ces_03_0034.html
 
 BatchListMetricData
 POST /V1.0/{project_id}/batch-query-metric-data
+
+https://support.huaweicloud.com/api-ces/ces_03_0059.html
+
+支持监控的服务列表（数据库分类及各产品监控指标文档入口）
 ```
 
 本文只保留直接影响内部实现的接口限制：
@@ -510,7 +548,7 @@ POST /V1.0/{project_id}/batch-query-metric-data
 
 #### 5.4.2 内部查询和校验
 
-规范化后的内部查询包含：
+规范化后先生成 `ces_queries`，数组中的每一项都是单指标内部查询，包含：
 
 ```text
 project_id
@@ -524,14 +562,14 @@ normalization_version
 backend_version
 ```
 
-内部 `ces_query` 字段：
+内部单指标 `ces_query` 字段：
 
 | 字段 | 中文含义 | 类型 | 来源/作用 |
 | --- | --- | --- | --- |
 | `project_id` | 项目 ID | String | 来自 CES，定义见 CES 接口文档 |
 | `region` | 云区域 | String | 供 MCP CLI 选择华为云区域 |
 | `request_body` | CES 请求体 | Object | 对应 CES `BatchListMetricData` 请求 Body |
-| `request_body.metrics` | 指标列表 | Array<Object> | 来自 CES，定义见 CES 接口文档 |
+| `request_body.metrics` | 指标列表 | Array<Object> | 单指标查询中固定包含一个 CES MetricInfo；批量规划时再合并多个查询 |
 | `request_body.from` | 开始时间 | Integer | 来自 CES，定义见 CES 接口文档 |
 | `request_body.to` | 结束时间 | Integer | 来自 CES，定义见 CES 接口文档 |
 | `request_body.period` | 聚合周期 | Integer | 来自 CES；adapter 调用时转换为接口要求的字符串 |
@@ -539,7 +577,7 @@ backend_version
 | `normalization_version` | 规范化版本 | String | 参与 cache key，防止不同规范化规则错误复用同一 dataset |
 | `backend_version` | 获取后端版本 | String | 参与 cache key，区分不同 CES backend 或参数映射版本 |
 
-当前实现执行以下校验：
+公开规格规范化和单批 CES 规划执行以下校验：
 
 ```text
 project_id 长度 1 到 64
@@ -555,8 +593,12 @@ period in {1, 60, 300, 1200, 3600, 14400, 86400}
 
 当 `period = 1` 时，数据点上限计算使用 60 秒作为 effective period。
 
-官方接口在查询区间超限时可能自动调整 `from`。本设计采用更严格的内部行为：
-超限时返回 `query_too_large`，建议增加 period、按指标拆分或按时间拆分，不静默改变调用方请求的时间窗口。
+官方接口在查询区间超限时可能自动调整 `from`。本设计不静默改变调用方请求的时间窗口：
+
+1. 先逐指标查询缓存，只将 miss 指标交给批量规划器。
+2. 按输入顺序贪心合并指标；加入下一指标会超过 500 指标、3000 数据点或 512KB 时开始新批次。
+3. 每个指标在不同批次中仍使用相同的 from/to/period，确保单指标分析数据长度不被缩短。
+4. 若一个指标单独请求仍超过限制，返回 `query_too_large`，由调用方调整 period 或时间范围。
 
 当前 CES 接入仍有以下待完成项：
 
@@ -586,7 +628,7 @@ huaweicloud-mcp call ces_BatchListMetricData --args '<JSON>'
 
 ```bash
 huaweicloud-mcp call ces_BatchListMetricData \
-  --args '{"region":"cn-north-4","project_id":"project-xxx","metrics":[{"namespace":"SYS.RDS","metric_name":"cpu_util","dimensions":[{"name":"instance_id","value":"rds-xxx"}]}],"period":"300","filter":"average","from":1753776000000,"to":1753779600000}'
+  --args '{"region":"cn-north-7","project_id":"06ce852b5d00d27f2f4bc009e650e95e","metrics":[{"namespace":"SYS.RDS","metric_name":"rds001_cpu_util","dimensions":[{"name":"rds_cluster_id","value":"32804075f7f14481a8fe9cd4b0e5c883in01"}]}],"period":"300","filter":"average","from":1784706014452,"to":1784706064452}'
 ```
 
 示例中的区域、项目、指标、维度值、时间范围和 period 仅展示命令结构。生产调用时
@@ -597,13 +639,14 @@ huaweicloud-mcp call ces_BatchListMetricData \
 `McpCliCesFetcher` 负责：
 
 ```text
-内部 ces_query
+一个批次的 CES query
 -> 映射为 CES tool 的 MCP inputSchema
 -> 构造 huaweicloud-mcp argv
 -> subprocess 捕获完整 stdout
 -> 校验 CLI envelope
 -> 从唯一的 result 提取 CES response
--> 交给 DatasetStore
+-> 按请求 metric_name 拆成单指标 response
+-> 分别交给 DatasetStore
 ```
 
 真实命令必须以 argv 数组执行，不使用 shell 字符串拼接。紧凑 JSON 作为 `--args` 的单个参数传入。
@@ -620,9 +663,12 @@ huaweicloud-mcp call ces_BatchListMetricData \
 ]
 ```
 
-内部 `ces_query` 按真实命令要求映射为 `region`、`project_id`、`metrics`、`period`、
+批次 query 按真实命令要求映射为 `region`、`project_id`、`metrics`、`period`、
 `filter`、`from` 和 `to`。其中 `period` 转成字符串；其他值保持
 `MetricAnalysisSpec` 规范化后的类型和内容。
+
+`metrics` 可包含同一公开请求中的一个或多个 cache miss 指标。批量规划只合并共享
+region、project_id、namespace、dimensions、from、to、period 和 filter 的指标。
 
 #### 5.5.3 大结果处理
 
@@ -633,7 +679,10 @@ CLI 没有 `--output` 不代表必须让数据经过 Hermes terminal：
 - adapter 解析成功后立即写入 DatasetStore。
 - 最外层 CLI 只打印紧凑 `AnalysisResult`。
 
-因此，Hermes terminal 的约 50,000 字符展示截断不会截断内部 subprocess 已捕获的数据。禁止由 Skill 直接执行 CES CLI 并把完整 stdout 暴露给 Agent。
+因此，Hermes terminal 默认 `50,000` 字符的展示截断不会截断内部 subprocess
+已捕获的数据。该默认值可由 Hermes 的 `tool_output.max_bytes` 配置调整，但不会
+改变这里的内部捕获边界。禁止由 Skill 直接执行 CES CLI 并把完整 stdout 暴露给
+Agent。
 
 #### 5.5.4 CLI 返回结构
 
@@ -724,9 +773,10 @@ CLI 没有 `--output` 不代表必须让数据经过 Hermes terminal：
 | `result.metrics` | CES 指标数据 | 必须是数组，交给 DatasetStore 规范化 |
 | `result.trace_id` | CES 请求追踪 ID | 保留在 CES 原始业务响应中，不进入 `AnalysisResult` |
 
-Adapter 只向 DatasetStore 返回 `result`，不返回整个 CLI envelope。这样
-`raw_response.json` 保存 CES 业务响应及 `trace_id`，而 `tool`、`arguments`、
-`content` 和 `content_count` 不进入 dataset 和分析算法。
+Adapter 只返回 `result`，不返回整个 CLI envelope。`MetricDatasetResolver` 随后校验
+每个请求指标在响应中恰好出现一次，并按 `metric_name` 拆分。每个
+`raw_response.json` 只保存该指标的 CES 业务响应及批次 `trace_id`；`tool`、
+`arguments`、`content` 和 `content_count` 不进入 dataset 和分析算法。
 
 CLI 失败时的 stdout/stderr 和退出码结构仍需在真实环境补充验证。当前 adapter
 按以下顺序构造 `data_fetch_failed.message`：
@@ -751,7 +801,7 @@ stdout 分别使用对应的确定性错误说明。当前实现没有对这些
 <HERMES_HOME>/datasets/metric-analysis/
 ```
 
-每次缓存 miss 并成功拉数后创建：
+每个单指标缓存 miss 成功拉数后创建：
 
 ```text
 ces_<microsecond-timestamp>_<cache-key-suffix>_<random-suffix>/
@@ -764,7 +814,7 @@ ces_<microsecond-timestamp>_<cache-key-suffix>_<random-suffix>/
 
 | 文件 | 内容 |
 | --- | --- |
-| `raw_response.json` | CLI envelope 中的 CES `result`，包括 `metrics` 和 `trace_id`，供排障和重新解析 |
+| `raw_response.json` | 从 CLI envelope 的 CES `result` 拆出的单指标响应，包括一个 metrics 元素和 `trace_id`，供排障和重新解析 |
 | `data.jsonl` | 规范化后的 `{metric_name,timestamp,value}` |
 | `metadata.json` | dataset_id、来源、点数、指标数、sha256 和版本 |
 
@@ -784,8 +834,8 @@ ces_<microsecond-timestamp>_<cache-key-suffix>_<random-suffix>/
 | `source` | 数据来源 | String | 当前固定为 `huaweicloud_ces` |
 | `cache_key` | 缓存键 | String | 关联产生该 dataset 的规范化 CES 查询 |
 | `created_at` | 创建时间 | String | dataset 写入完成时的 UTC ISO 8601 时间 |
-| `point_count` | 数据点数量 | Integer | 所有指标序列的数据点总数 |
-| `metric_count` | 指标数量 | Integer | 规范化结果中不同指标名称的数量 |
+| `point_count` | 数据点数量 | Integer | 当前单指标序列的数据点总数 |
+| `metric_count` | 指标数量 | Integer | 当前固定为 `1` |
 | `sha256` | 数据摘要 | String | `data.jsonl` 的 SHA-256，用于完整性校验 |
 | `normalization_version` | 规范化版本 | String | 标识生成 `data.jsonl` 所使用的数据格式版本 |
 
@@ -817,7 +867,8 @@ DatasetStore 运行时返回结构：
 
 #### 5.7.1 缓存对象和形式
 
-缓存对象是 CES 时序 dataset，不是 `AnalysisResult`。
+缓存对象是单指标 CES 时序 dataset，不是 `AnalysisResult`。一次 CES 调用可获取多个指标，
+但响应必须在缓存写入前拆分，因此 cache key、cache index 和 dataset 始终一一对应一个指标。
 
 物理形式：
 
@@ -915,7 +966,7 @@ dataset path
 trace id
 ```
 
-这样同一批 CES 数据可以被多个 profile 复用。
+这样同一个指标的 CES 数据可以被多个 profile 复用，也能在双指标请求部分命中时只拉取缺失指标。
 
 `sha256` 是当前已经实现的算法，但最终选择仍未定。后续可基于跨语言一致性、吞吐量、依赖、碰撞风险和运维便利性评估 `blake2` 或 `xxHash128`。在决定替换前，文档和代码均以当前 `sha256` 行为为准。
 
@@ -967,18 +1018,21 @@ cache_put
 
 #### 5.7.5 并发
 
-同一个 cache key 的 `cache_get -> fetch -> persist -> cache_put` 由文件系统锁保护。锁目录通过原子创建获取，可跨进程工作；并发调用等待锁持有者写入 cache 后重新读取，因此同一 miss 只拉取一次 CES。
+同一个 cache key 的 `cache_get -> fetch -> persist -> cache_put` 由文件系统锁保护。每个 CES 规划批次只获取该批涉及的锁，并按 cache key 排序，避免两个请求以不同顺序等待形成死锁。当前批次写入完成后立即释放锁，再处理下一批，因此多批串行拉数不会让前一批指标持续持锁。锁目录通过原子创建获取，可跨进程工作；并发调用拿到锁后重新读取 cache，因此同一单指标 miss 只拉取一次 CES。
 
-锁设置等待超时和 stale 清理，dataset 目录名同时包含微秒时间、cache key 后缀和随机后缀，原子 JSON 写入使用同目录唯一临时文件，避免不同查询或进程互相覆盖。
+锁等待上限为单次 CES fetch 超时加 30 秒；锁设置 stale 清理。创建锁目录后若 owner 元数据写入失败，会立即清理锁目录并返回内部错误。dataset 目录名同时包含微秒时间、cache key 后缀和随机后缀，原子 JSON 写入使用同目录唯一临时文件，避免不同查询或进程互相覆盖。
 
 ### 5.8 分析执行
 
 `MetricAnalysisService` 只负责编排，不实现算法：
 
 ```text
-normalize
--> limit validation
--> cache get/fetch/persist/cache put
+find_missing_required_fields
+-> normalize
+-> MetricDatasetResolver
+-> per-metric cache get
+-> batch missing metrics under CES limits
+-> fetch/split/per-metric persist/cache put
 -> AnalysisContext.from_period
 -> registry.run_analysis
 -> ProfileBinding.options_factory
@@ -1010,6 +1064,7 @@ Registry 再根据 `analysis.profile` 将该对象转换为对应的不可变强
 | `median_p75_statistics` | `MedianP75Options` | `smoothing_time` |
 | `rising_trend_detection` | `RisingTrendOptions` | 无字段 |
 | `trend_prediction` | `TrendPredictionOptions` | 无字段 |
+| `coincident_anomaly_detection` | `CoincidentAnomalyOptions` | `time_point`、`lookback_seconds`、`box_scale`、`direction`、`window_size`、`residual_sen`、`nonzero` |
 
 外部 `analysis` JSON 是调用契约，内部 Options 是实现契约。Options 不属于 CLI
 输入输出，也不会出现在 `AnalysisResult` 中。新增 profile 时，需要同时增加外部参数定义、
@@ -1043,7 +1098,7 @@ Profile 内部结果字段：
 
 `build_result` 再生成当前请求指标的 `statistics` 或 `forecast` 快捷字段。分析结果仅由 CLI 返回，不额外写入文件。
 
-`statistics_by_metric` 和 `forecast_by_metric` 仅作为 profile 到结果构造器之间的内部结构。公共请求一次只分析一个指标，因此 `build_result` 只提取当前 `metric_name` 对应的 `statistics` 或 `forecast`，不向 LLM 返回整个 map。
+`statistics_by_metric` 和 `forecast_by_metric` 仅作为 profile 到结果构造器之间的内部结构。只有单指标 profile 会产生这两个字段，因此 `build_result` 只提取 `metric_name` 数组首个指标对应的 `statistics` 或 `forecast`，不向 LLM 返回整个 map。双指标关联 profile 只返回紧凑 findings。
 
 #### 5.8.1 滑动窗口阈值频次检测
 
@@ -1063,7 +1118,7 @@ Profile 内部结果字段：
 #### 5.8.2 指标突增或突降检测
 
 `spike_drop_detection` 迁移原 MySQL 故障诊断服务的两路异常检测逻辑。
-`MetricAnalysisSpec` 已经限定单指标和 CES 查询时间窗口，因此不再保留原函数的
+该 profile 的规格校验已经限定单指标和 CES 查询时间窗口，因此不再保留原函数的
 `DataFrame`、`col_name`、`time_start` 和 `time_end` 参数。
 
 计算过程：
@@ -1107,7 +1162,48 @@ all  = up 或 down
 `time_window.start/end`。`evidence` 返回异常点值、残差、趋势差分、两组上下界、
 触发来源以及平滑时间/点窗，不返回原始时序数组。
 
-#### 5.8.3 上升趋势方向计数
+#### 5.8.3 双指标关联异常检测
+
+`coincident_anomaly_detection` 适配原 MySQL 故障诊断中“故障发生前 30 分钟内，
+目标指标和 QPS 均发生突增”的判断方式，但不硬编码 CPU、QPS 或具体文案。该 profile
+要求 `metric.metric_name` 恰好包含两个指标，并复用 `SpikeDropDetector` 对两个完整
+序列分别执行与 `spike_drop_detection` 相同的异常检测。
+
+计算过程：
+
+```text
+两个单指标 dataset -> 合并为 series_by_metric
+-> SpikeDropDetector 对每个指标产生完整异常事件列表
+-> window_start = time_point - lookback_seconds * 1000
+-> 分别保留 [window_start, time_point] 内的异常事件
+-> 两个指标的过滤结果都非空时，生成 coincident_anomaly finding
+-> 任一指标为空时，findings = []
+```
+
+默认 `lookback_seconds=1800`，即故障发生前 30 分钟。与原实现使用绝对时间差不同，
+当前实现严格按“故障前”语义排除 `time_point` 之后的异常。`direction` 默认 `up`，
+因此默认判断两个指标是否都突增；可显式使用 `down` 或 `all`。
+
+关联成立时只返回一条 finding。顶层 `metric_name` 和 finding 的 `metric_name` 都是
+两个指标名的数组；`time_window` 是完整回看窗口。`evidence.metrics` 为每个指标返回：
+
+```text
+metric_name
+abnormal
+kinds
+anomaly_count
+nearest_anomaly_time
+time_diff_ms
+min_value
+abnormal_value
+```
+
+其中 `nearest_anomaly_time` 是距离故障时间最近的异常点，`time_diff_ms` 是该点距
+故障时间的毫秒数。`min_value` 是回看窗口内该指标最小值；`abnormal_value` 在纯
+突降时取异常值最小值，否则取异常值最大值。该算法要求两个指标位于同一个故障前
+窗口，但不额外要求两个异常点彼此相差小于某个阈值。
+
+#### 5.8.4 上升趋势方向计数
 
 `rising_trend_detection` 迁移原服务的相邻点方向计数算法。当前框架已经提供
 按时间戳排序且去除无效值的单指标序列，因此不再保留原函数的 `DataFrame` 和
@@ -1145,7 +1241,7 @@ increasing_count == decreasing_count
 不使用线性回归，也不预测未来值。有效数据少于两个点时返回数据不足摘要和空
 `findings`，不返回 `invalid_request`。
 
-#### 5.8.4 Prophet 趋势预测
+#### 5.8.5 Prophet 趋势预测
 
 `trend_prediction` 迁移原服务的 Prophet 预测算法。当前框架已经提供按时间戳排序、
 去除无效值的单指标序列，因此不再保留原函数的 `DataFrame` 和 `col_name` 参数。
@@ -1205,7 +1301,7 @@ direction
 `downward`，绝对值不超过 `1e-9` 为 `flat`。`change_ratio` 使用
 `change / abs(first_predicted_value)`，首个预测值接近零时返回 `null`。
 
-#### 5.8.5 通用时序平滑
+#### 5.8.6 通用时序平滑
 
 `series/smoothing.py` 提供可复用的 NumPy/Pandas 平滑能力，供当前和后续 profile 使用。依赖由 Skill 根目录的 `requirements.txt` 声明，不加入 Hermes core 依赖。
 
@@ -1228,7 +1324,7 @@ direction
 
 NumPy 负责数值数组、补边、滑动窗口和窗口聚合；Pandas 负责缩小窗口模式和线性插值分位数。输入必须是一维、非空且全部为有限数值，窗口必须是正奇数；`drop` 模式要求数据点数不少于窗口大小。
 
-#### 5.8.6 中位数和 P75
+#### 5.8.7 中位数和 P75
 
 `median_p75_statistics` 接收上层可选参数 `analysis.smoothing_time`，单位秒，默认值为 `900`，即 15 分钟。
 
@@ -1265,8 +1361,9 @@ window_size = points // 2 * 2 + 1
 
 | 错误码 | 当前代码中的场景 | 当前输出行为 |
 | --- | --- | --- |
-| `invalid_request` | 缺少字段、值类型错误、请求体超过 512KB、period 或时间范围非法、无可用 datapoints、profile 不支持，或趋势预测历史跨度不足 7 天 | 返回具体校验消息；部分 CES 限制错误附带大小字段 |
-| `query_too_large` | 指标数超过 500，或估算数据点超过 3000 | 返回超限消息；数据点超限时附带估算值、上限和拆分建议 |
+| `missing_required_input` | 一个或多个必填字段未提供；包括所选 profile 声明的必填参数 | 一次返回完整 `missing_fields`，CES 查询不会执行；全部缺失字段补齐前不得再次调用 |
+| `invalid_request` | 已提供字段的值类型错误、单指标请求体超过 512KB、period 或时间范围非法、指标数量与 profile 不匹配、无可用 datapoints、profile 不支持，或趋势预测历史跨度不足 7 天 | 返回具体校验消息；请求体超限时附带大小字段 |
+| `query_too_large` | 单个指标在完整请求时间范围内估算数据点超过 3000 | 返回超限消息；附带估算值、上限和调整建议；多指标合计超限已由批量规划器自动拆批 |
 | `data_fetch_failed` | MCP CLI 配置、启动、超时、退出码、空输出、JSON/envelope 解析失败，或 datapoint 缺少 `average` | 返回 adapter 构造的失败消息；其中部分分支包含最多 1000 字符的 CLI/OSError 诊断文本 |
 | `internal_error` | 缓存锁超时、Prophet 依赖/执行失败，或其他未归类异常 | 统一返回固定消息 `Metric analysis failed unexpectedly`，不暴露原异常 |
 
@@ -1277,6 +1374,7 @@ window_size = points // 2 * 2 + 1
 | `success` | 执行是否成功 | Boolean | 是 | 错误结果固定为 `false` |
 | `error` | 错误码 | String | 是 | 供 LLM 或上层 Skill 选择修正、拆分或停止等处理分支 |
 | `message` | 错误说明 | String | 是 | 校验错误使用确定性文本；`internal_error` 使用固定脱敏文本；`data_fetch_failed` 可能包含受长度限制的后端诊断文本 |
+| `missing_fields` | 完整缺失字段列表 | Array<String> | 否 | 仅 `missing_required_input` 返回；调用方先从可信上下文补充，再一次性询问用户所有仍无法确定的值 |
 | `request_bytes` | 请求体字节数 | Integer | 否 | 仅请求超过 512KB 时返回，表示实际序列化大小 |
 | `limit_bytes` | 请求体字节上限 | Integer | 否 | 仅请求超过 512KB 时返回，当前为 `524288` |
 | `estimated_datapoints` | 估算数据点数 | Integer | 否 | 仅超过 CES 数据点限制时返回 |
@@ -1286,10 +1384,9 @@ window_size = points // 2 * 2 + 1
 | `suggestion.split_by_metric` | 是否建议按指标拆分 | Boolean | 条件必填 | 多指标内部查询时指示是否可按指标拆分 |
 | `suggestion.split_by_time` | 是否建议按时间拆分 | Boolean | 条件必填 | 为 `true` 时可缩短或分段查询时间窗口 |
 
-当前错误结果没有 `retryable`、`action` 或统一的 `details` 字段。除
-`success/error/message` 外，只有上表所列的 CES 限制字段可能出现在顶层。
-`MetricAnalysisError.extra` 也会原样合并到错误结果，但当前业务代码没有定义其他
-稳定的 extra 字段。
+当前错误结果没有 `action` 或统一的 `details` 字段。除
+`success/error/message` 外，只有上表所列的缺失输入和 CES 限制字段可能出现在顶层。
+`MetricAnalysisError.extra` 也会原样合并到错误结果。
 
 最小错误结构：
 
@@ -1323,6 +1420,8 @@ skills/metric-timeseries-analysis/
     references/
       analysis-contract.md
       analysis-contract.zh-CN.md
+      ces-database-metric-parameters.md
+      ces-database-metric-parameters.zh-CN.md
     scripts/
       analyze_metric_timeseries.py
       metric_timeseries_analysis/
@@ -1330,14 +1429,17 @@ skills/metric-timeseries-analysis/
         errors.py
         service/
           analysis_service.py
+          dataset_resolver.py
         contracts/
           spec.py
           result.py
         ces/
+          batch_planner.py
           fetcher.py
           mcp_cli_fetcher.py
           query_builder.py
           response_parser.py
+          response_splitter.py
           limits.py
         cache/
           config.py
@@ -1351,12 +1453,16 @@ skills/metric-timeseries-analysis/
           profile.py
           profile_catalog.py
           registry.py
+          detectors/
+            __init__.py
+            spike_drop_detector.py
           forecasting/
             __init__.py
             prophet_forecaster.py
           profiles/
             sliding_window_threshold_frequency.py
             spike_drop.py
+            coincident_anomaly.py
             median_p75.py
             rising_trend.py
             trend_prediction.py
@@ -1378,20 +1484,24 @@ skills/metric-timeseries-analysis/
 - `analysis/options.py` 定义各 profile 的不可变 Options 及 JSON 到 Options 的转换。
 - `analysis/profile_catalog.py` 负责外部 `analysis` JSON 的字段校验、默认值和 CLI 帮助。
 - `analysis/registry.py` 负责将 profile、Options 工厂和算法实现绑定并执行。
+- `analysis/detectors` 保存可被多个 profile 组合使用的完整事件检测器；profile 决定结果摘要和 LLM 输出裁剪。
 - `analysis/forecasting` 封装 Prophet 等预测引擎，不承载业务规则或公共结果组装。
 - `analysis/profiles` 只负责算法，不依赖完整 spec、CES、缓存或 service。
-- `service` 只负责串联流程。
+- `service` 只负责串联流程；`dataset_resolver.py` 负责逐指标缓存解析和多指标拉数编排。
 - `io` 和 `series` 提供低层通用结构，不依赖 service。
 
-Skill 私有依赖由 `requirements.txt` 声明，当前包括 NumPy、Pandas 和 Prophet，
-不加入 Hermes core 依赖。
+Skill 私有依赖由 `requirements.txt` 声明，当前包括 NumPy、Pandas 和
+`prophet>=1.2.1,<2`，不加入 Hermes core 依赖。Prophet 1.2.1 开始修复其精简
+CmdStan 包缺少 `makefile` 的问题，因此不再允许安装 1.1.6。部署时优先安装 PyPI
+提供的目标平台 wheel；如果安装器回退到 source distribution，则部署环境还必须
+自行提供可用的 CmdStan 和对应 C++ 构建工具链。
 
 ### 6.2 当前 CLI
 
 唯一分析入口：
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py \
+python3 skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py \
   analyze --args '<MetricAnalysisSpec JSON>'
 ```
 
@@ -1400,9 +1510,9 @@ python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analy
 能力发现入口：
 
 ```bash
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profiles
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name>
-python skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name> --help
+python3 skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profiles
+python3 skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name>
+python3 skills/metric-timeseries-analysis/analyze-metric-timeseries/scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
 当前不提供以下独立命令：
@@ -1466,13 +1576,18 @@ error code
 ### 7.1 单元测试
 
 - `MetricAnalysisSpec` 必填字段、CES 格式/长度、dimensions 和 profile 参数校验。
+- 缺失公共字段、嵌套 metric/time_window 字段或 profile 必填参数时，一次返回完整
+  `missing_fields`，且不调用 CES。
 - CES period、时间范围、512KB 请求体和 3000 数据点上限。
 - canonical query 和 cache key 稳定性。
 - cache hit、TTL 过期、文件缺失、sha256 错误、受管路径删除和 LRU 淘汰。
-- 相同 cache key 的并发 miss 只调用一次 CES，dataset 和原子临时文件名不冲突。
+- 相同 cache key 的并发 miss 只调用一次 CES；多批请求逐批持锁；owner 元数据写入失败时不残留锁目录；dataset 和原子临时文件名不冲突。
 - DatasetStore 写入、读取和指标排序。
-- CLI JSON 包装与 CES response 解析。
-- 五个 profile 的参数和算法边界，包括 Prophet 七天历史校验和 168 小时预测。
+- CLI JSON 包装与 CES response 解析，包括多指标 metrics 参数和批量响应乱序、缺失、重复校验。
+- 六个 profile 的参数和算法边界，包括双指标关联的故障前窗口语义、Prophet 七天历史校验和 168 小时预测。
+- metric_name 数组非空、去重和各 profile 指标数量约束。
+- 两个 cache miss 合并为一次 CES 请求，部分命中时只查询缺失指标，合计超限时按指标拆成多个完整时间范围批次。
+- CES 批量响应按指标拆成两个单指标 dataset 和 cache index。
 - `MetricAnalysisService` 在 fake fetcher 下的缓存复用。
 
 ### 7.2 集成测试
@@ -1481,8 +1596,10 @@ error code
   `trace_id`。
 - 验证 adapter 将 `MetricAnalysisSpec` 映射为 `ces_BatchListMetricData` 的真实参数。
 - 同一 CES 查询使用不同 profile 时只复用 dataset，不复用分析结果。
-- CLI stdout 只包含紧凑 `AnalysisResult` 白名单字段。
+- `analyze` stdout 只包含一个紧凑 JSON；成功时为 `AnalysisResult` 白名单字段，
+  失败时为已定义的结构化错误字段。
 - 接近 3000 datapoints 的响应完整写入 DatasetStore，不进入 LLM 上下文。
+- 双指标关联分析复用突增突降检测结果，并排除故障时间之后的异常点。
 - 缓存损坏后重新拉取并完成分析。
 
 ### 7.3 验收标准
@@ -1491,20 +1608,22 @@ error code
 - CES 原始响应不会成为 Hermes terminal tool result。
 - `AnalysisResult` 不包含 raw datapoints、dataset/cache/trace 元数据或内部按指标 map。
 - Profile 参数可通过 CLI 自发现。
+- 数据库指标参数由通用分析 Skill 强制查阅专用 reference 后填写。
 - 缓存只复用 dataset，切换 profile 会重新执行算法。
 - 同一查询的并发 miss 被合并，缓存容量按 dataset 全部文件计算。
+- 多指标查询可以合并 CES 调用，但缓存仍保持一个指标一个 cache entry 和 dataset。
 - 文档中的 CLI、字段、默认值和错误码与代码一致。
 - `huaweicloud-mcp` 可执行文件和 MCP Server 可用时，真实 CES 调用能够完成；其
   返回解析在真实环境测试后单独验收。
 
 ## 8. 交付步骤
 
-1. 保持现有 `MetricAnalysisSpec`、DatasetStore、缓存和五个 profile。
+1. 使用 metric_name 数组形式的 `MetricAnalysisSpec`、单指标 DatasetStore/cache 和六个 profile。
 2. 在部署环境安装并配置 `huaweicloud-mcp`。
 3. 确认 MCP Server 已提供 `ces_BatchListMetricData`。
 4. 执行真实 CES 集成测试，验证动态参数，并补充采集失败输出样例。
 5. 验证接近 3000 个 datapoints 的结果只在内部捕获和落盘，外层只返回
-   `AnalysisResult`。
+   `AnalysisResult` 或结构化错误对象。
 
 ## 9. 待确认事项
 
