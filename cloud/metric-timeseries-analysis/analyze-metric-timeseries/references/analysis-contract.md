@@ -59,6 +59,8 @@ analysis profile options
 
 The caller does not provide an aggregation filter. The implementation always uses the CES `average` aggregation.
 
+`metric.metric_name` is a non-empty array of unique metric-name strings. Existing single-series profiles require exactly one item. `coincident_anomaly_detection` requires exactly two items. All items share the same namespace, dimensions, region, project, time window, period, and internal aggregation.
+
 `metric.dimensions[].name` is not hardcoded. Use the dimension key from the target CES metric documentation, such as `instance_id` only when that metric defines `instance_id` as its dimension.
 
 CES field constraints are validated before fetching: `project_id` is 1-64 characters, timestamps are within the CES millisecond range, namespace and metric names follow the CES formats, and each metric has 1-4 dimensions. Profile options are also strict: unknown options, wrong JSON types, invalid choices, and inconsistent window settings are rejected.
@@ -71,7 +73,7 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name>
 python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
-`profile <profile-name>` prints JSON with option names, types, defaults, choices, and an `example_analysis` block that can be copied into `MetricAnalysisSpec.analysis`.
+`profile <profile-name>` prints JSON with `min_metric_count`, `max_metric_count`, option names, types, defaults, choices, and an `example_analysis` block that can be copied into `MetricAnalysisSpec.analysis`.
 
 Profile options:
 
@@ -82,6 +84,7 @@ Profile options:
 | `median_p75_statistics` | `smoothing_time` is an optional positive integer in seconds and defaults to `900`. |
 | `rising_trend_detection` | No additional options. |
 | `trend_prediction` | No additional options. Requires at least seven days of metric history. |
+| `coincident_anomaly_detection` | Exactly two metrics. `time_point` is required in milliseconds; `lookback_seconds` defaults to `1800`. The spike/drop options `box_scale`, `direction`, `window_size`, `residual_sen`, and `nonzero` are optional. |
 
 For `median_p75_statistics`, the script derives an odd median-smoothing window from `ceil(smoothing_time / effective_period)`, uses zero padding at both series boundaries, and computes median and p75 from the smoothed values. `period = 1` uses an effective period of 60 seconds.
 
@@ -110,6 +113,8 @@ Its finding evidence has this shape:
 
 For `trend_prediction`, timestamps are floored to the hour and values in the same hour are averaged. The timezone is removed before fitting `Prophet(growth="linear", changepoint_range=0.9)`. The model predicts 168 hourly values with `include_history=false`. The 168 derived points remain internal; `forecast` and finding evidence contain only their start/end time, first/last/min/max/mean value, total change, change ratio, and direction.
 
+For `coincident_anomaly_detection`, the script applies the same spike/drop detector used by `spike_drop_detection` independently to both metrics. It reports a coincident anomaly only when both metrics contain an anomaly in the closed interval `[time_point - lookback_seconds, time_point]`. The default interval is the 30 minutes before the incident. Events after `time_point` are not evidence. The result includes compact per-metric anomaly summaries and does not expose raw datapoints.
+
 ## AnalysisResult
 
 `AnalysisResult` is the compact JSON object printed by the script. It is the only result service skills should use as metric evidence.
@@ -119,7 +124,7 @@ Required success shape:
 ```json
 {
   "success": true,
-  "metric_name": "cpu_util",
+  "metric_name": ["cpu_util"],
   "profile": "trend_prediction",
   "summary": "Forecasted the next seven days with Prophet.",
   "findings": []
@@ -156,7 +161,7 @@ direction               upward, downward, or flat.
 ```json
 {
   "success": true,
-  "metric_name": "cpu_util",
+  "metric_name": ["cpu_util"],
   "profile": "median_p75_statistics",
   "summary": "Computed median and p75 statistics for the requested metric.",
   "findings": [
@@ -186,11 +191,13 @@ direction               upward, downward, or flat.
 
 For this profile, `count`, `min`, and `max` describe the valid input series; `median` and `p75` are computed from the zero-padded median-smoothed series.
 
+For `coincident_anomaly_detection`, the top-level `metric_name` contains both requested names. A matching finding has `kind = "coincident_anomaly"`; its evidence contains `time_point`, `lookback_seconds`, and one compact anomaly summary for each metric. When either metric has no anomaly in the incident lookback interval, `findings` is empty and `summary` explains which condition was not met.
+
 The success result is an LLM-visible allowlist. It must not contain raw datapoints, `analysis_id`, `dataset_ref`, cache state, file paths, hashes, byte counts, or internal `statistics_by_metric` / `forecast_by_metric` maps. Operational and cache metadata remain in internal logs, DatasetStore, and the cache index.
 
 ## CES Query Limit
 
-The script enforces the Huawei Cloud CES batch metric data limit:
+The script plans one or more Huawei Cloud CES batch requests. Each emitted request enforces:
 
 ```text
 metrics_count <= 500
@@ -200,9 +207,11 @@ serialized CES request body <= 512KB
 
 For `period = 1`, the script follows the CES API behavior and treats the effective period as 60 seconds for this limit calculation.
 
+Only cache misses are included in CES requests. When adding another metric would exceed a limit, the planner starts another request without shortening that metric's requested time range. A single metric that exceeds the datapoint limit by itself fails with `query_too_large`; a single request body over 512KB fails with `invalid_request`.
+
 ## Cache
 
-The script caches CES time-series datasets, not analysis results.
+The script caches CES time-series datasets, not analysis results. Every cache entry and dataset contains exactly one metric, even when several metrics were fetched in one CES request. A batch response is split by metric before persistence; a partial cache hit therefore fetches only the missing metrics.
 
 Cache key:
 
@@ -243,7 +252,7 @@ Eviction triggers:
 2. Capacity eviction on cache put when max bytes or max entries is exceeded. Expired entries are removed first, then LRU entries.
 ```
 
-Cache policy is service-owned and cannot be overridden by `MetricAnalysisSpec`. Capacity counts all persisted files in each dataset. Requests with the same cache key use a filesystem lock so one cache miss performs the CES fetch while concurrent callers reuse the resulting dataset.
+Cache policy is service-owned and cannot be overridden by `MetricAnalysisSpec`. Capacity counts all persisted files in each dataset. Each planned CES batch acquires only its involved single-metric cache-key locks in stable order and rechecks the cache after locking. One caller performs each miss while concurrent callers reuse the dataset; locks are released before the next batch.
 
 Default cache root:
 
@@ -253,7 +262,7 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
 
 ## Error Contract
 
-`query_too_large` means the CES request exceeds the API datapoint limit.
+`query_too_large` means one metric exceeds the CES datapoint limit without shortening its requested time range.
 
 `data_fetch_failed` means the internal MCP CLI adapter or backend command failed.
 
@@ -264,8 +273,7 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
   "success": false,
   "error": "missing_required_input",
   "message": "Missing required inputs: project_id, time_window.to. Collect all missing values before retrying.",
-  "missing_fields": ["project_id", "time_window.to"],
-  "retryable": false
+  "missing_fields": ["project_id", "time_window.to"]
 }
 ```
 

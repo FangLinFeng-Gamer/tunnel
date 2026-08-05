@@ -59,6 +59,8 @@ analysis profile options
 
 调用方不传聚合方式，内部固定使用 CES `average` 聚合。
 
+`metric.metric_name` 是由不重复指标名字符串组成的非空数组。已有单序列 profile 要求数组中恰好有一个指标；`coincident_anomaly_detection` 要求恰好有两个指标。数组中的指标共享 namespace、dimensions、region、project、时间范围、period 和内部聚合方式。
+
 `metric.dimensions[].name` 不是固定值。必须使用目标 CES 指标文档定义的维度 key；只有当该指标定义维度名为 `instance_id` 时，才填写 `instance_id`。
 
 脚本会在拉数前校验 CES 字段约束：`project_id` 长度为 1 到 64，时间戳处于 CES 毫秒范围内，namespace 和指标名称符合 CES 格式，每个指标包含 1 到 4 个维度。profile 参数同样采用严格校验：未知参数、错误 JSON 类型、非法枚举值和不一致的窗口参数都会被拒绝。
@@ -71,7 +73,7 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name>
 python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
-`profile <profile-name>` 会输出 JSON，包含参数名、类型、默认值、可选值，以及可复制到 `MetricAnalysisSpec.analysis` 的 `example_analysis`。
+`profile <profile-name>` 会输出 JSON，包含 `min_metric_count`、`max_metric_count`、参数名、类型、默认值、可选值，以及可复制到 `MetricAnalysisSpec.analysis` 的 `example_analysis`。
 
 各 profile 参数：
 
@@ -82,6 +84,7 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 | `median_p75_statistics` | `smoothing_time` 可选，单位秒，必须是正整数，默认 `900`。 |
 | `rising_trend_detection` | 无额外参数。 |
 | `trend_prediction` | 无额外参数；要求指标历史数据跨度至少七天。 |
+| `coincident_anomaly_detection` | 恰好两个指标；`time_point` 必填，单位毫秒；`lookback_seconds` 默认 `1800`。`box_scale`、`direction`、`window_size`、`residual_sen` 和 `nonzero` 为可选突增突降参数。 |
 
 `median_p75_statistics` 根据 `ceil(smoothing_time / effective_period)` 计算奇数中值平滑窗口，在序列两端补零，对平滑后的序列计算中位数和 p75。`period = 1` 时，有效时间粒度按 60 秒计算。
 
@@ -110,6 +113,8 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 
 `trend_prediction` 先将时间戳向下取整到小时，并对同一小时的值求平均；去除时区后使用 `Prophet(growth="linear", changepoint_range=0.9)` 拟合。模型通过 `include_history=false` 预测未来 168 个小时值。168 个派生预测点只在内部使用；`forecast` 和 finding evidence 只返回起止时间、首个/末个/最小/最大/平均预测值、总变化量、变化比例和方向。
 
+`coincident_anomaly_detection` 分别对两个指标复用 `spike_drop_detection` 使用的同一套突增突降检测器。只有两个指标都在闭区间 `[time_point - lookback_seconds, time_point]` 内出现异常时，才判定为关联异常。默认检查故障发生前 30 分钟；`time_point` 之后的异常不作为证据。结果只返回每个指标的紧凑异常摘要，不暴露原始数据点。
+
 ## AnalysisResult
 
 `AnalysisResult` 是脚本打印的紧凑 JSON 对象。服务类 skill 只应该消费这个对象作为指标证据。
@@ -119,7 +124,7 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```json
 {
   "success": true,
-  "metric_name": "cpu_util",
+  "metric_name": ["cpu_util"],
   "profile": "trend_prediction",
   "summary": "Forecasted the next seven days with Prophet.",
   "findings": []
@@ -156,7 +161,7 @@ direction               upward、downward 或 flat。
 ```json
 {
   "success": true,
-  "metric_name": "cpu_util",
+  "metric_name": ["cpu_util"],
   "profile": "median_p75_statistics",
   "summary": "Computed median and p75 statistics for the requested metric.",
   "findings": [
@@ -186,11 +191,13 @@ direction               upward、downward 或 flat。
 
 该 profile 中，`count`、`min`、`max`描述有效输入序列；`median`、`p75`基于两端补零并进行中值平滑后的序列计算。
 
+`coincident_anomaly_detection` 的顶层 `metric_name` 包含两个请求指标名。关联成立时，finding 的 `kind` 为 `coincident_anomaly`，evidence 包含 `time_point`、`lookback_seconds` 和两个指标各自的紧凑异常摘要。任一指标在故障前窗口内没有异常时，`findings` 为空，`summary` 会说明条件未同时满足。
+
 成功结果采用 LLM 可见字段白名单。`AnalysisResult` 不能包含原始数据点、`analysis_id`、`dataset_ref`、缓存状态、文件路径、hash、字节数，也不能包含内部 `statistics_by_metric` / `forecast_by_metric` 映射。运维和缓存元数据只保留在内部日志、DatasetStore 和 cache index。
 
 ## CES 查询限制
 
-脚本会强制执行华为云 CES 批量查询指标数据接口限制：
+脚本会规划一个或多个华为云 CES 批量查询请求，每个实际发出的请求都满足：
 
 ```text
 metrics_count <= 500
@@ -200,9 +207,11 @@ metrics_count * (to - from) / period <= 3000
 
 当 `period = 1` 时，脚本遵循 CES API 行为，在该限制计算中将有效周期视为 60 秒。
 
+CES 请求只包含缓存未命中的指标。继续加入指标会超过任一限制时，规划器会开启下一次请求，不会缩短任何单指标的请求时间范围。若一个指标单独请求仍超过数据点限制，则返回 `query_too_large`；单个请求体超过 512KB 时返回 `invalid_request`。
+
 ## 缓存
 
-脚本缓存 CES 时序 dataset，不缓存分析结果。
+脚本缓存 CES 时序 dataset，不缓存分析结果。即使一次 CES 请求获取多个指标，每个 cache entry 和 dataset 也只保存一个指标。批量响应在持久化前按指标拆分；部分缓存命中时只查询缺失指标。
 
 缓存 key：
 
@@ -243,7 +252,7 @@ trace id
 2. cache put 时进行容量淘汰：当 max bytes 或 max entries 超限时触发。先删除过期 entry，再删除 LRU entry。
 ```
 
-缓存策略由服务统一管理，`MetricAnalysisSpec` 不能覆盖。容量统计包含每个 dataset 的全部持久化文件。同一 cache key 使用文件系统锁合并并发 miss：一个调用负责拉取 CES，其余调用复用写入后的 dataset。
+缓存策略由服务统一管理，`MetricAnalysisSpec` 不能覆盖。容量统计包含每个 dataset 的全部持久化文件。每个 CES 规划批次只按固定顺序获取本批涉及的单指标 cache key 文件锁，拿锁后重新检查缓存，并在进入下一批前释放：一个调用负责拉取 CES，其余调用复用写入后的 dataset，同时避免多指标请求形成死锁。
 
 默认缓存根目录：
 
@@ -253,7 +262,7 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
 
 ## 错误契约
 
-`query_too_large` 表示 CES 请求超过 API 数据点限制。
+`query_too_large` 表示某个单指标在不缩短请求时间范围的情况下超过 CES 数据点限制。
 
 `data_fetch_failed` 表示内部 MCP CLI adapter 或后端命令执行失败。
 
@@ -264,8 +273,7 @@ ${HERMES_HOME:-$HOME/.hermes}/datasets/metric-analysis
   "success": false,
   "error": "missing_required_input",
   "message": "Missing required inputs: project_id, time_window.to. Collect all missing values before retrying.",
-  "missing_fields": ["project_id", "time_window.to"],
-  "retryable": false
+  "missing_fields": ["project_id", "time_window.to"]
 }
 ```
 

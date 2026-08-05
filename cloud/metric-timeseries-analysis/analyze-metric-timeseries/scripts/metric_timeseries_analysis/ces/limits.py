@@ -13,7 +13,10 @@ from metric_timeseries_analysis.constants import (
 
 
 def validate_ces_limits(spec: dict[str, Any]) -> dict[str, Any] | None:
-    query = spec["ces_query"]
+    return validate_ces_query_limits(spec["ces_query"])
+
+
+def validate_ces_query_limits(query: dict[str, Any]) -> dict[str, Any] | None:
     request_body = query["request_body"]
     metrics_count = len(request_body["metrics"])
     period = int(request_body["period"])

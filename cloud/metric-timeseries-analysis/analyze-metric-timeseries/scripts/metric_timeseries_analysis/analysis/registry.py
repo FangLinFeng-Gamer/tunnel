@@ -5,6 +5,7 @@ from typing import Any, Callable, Generic, Mapping, TypeVar
 
 from metric_timeseries_analysis.analysis.context import AnalysisContext
 from metric_timeseries_analysis.analysis.options import (
+    build_coincident_anomaly_options,
     build_median_p75_options,
     build_rising_trend_options,
     build_sliding_window_threshold_options,
@@ -16,6 +17,9 @@ from metric_timeseries_analysis.analysis.profile import (
     ProfileAnalysisResult,
 )
 from metric_timeseries_analysis.analysis.profiles.median_p75 import MedianP75Statistics
+from metric_timeseries_analysis.analysis.profiles.coincident_anomaly import (
+    CoincidentAnomalyDetection,
+)
 from metric_timeseries_analysis.analysis.profiles.rising_trend import RisingTrendDetection
 from metric_timeseries_analysis.analysis.profiles.sliding_window_threshold_frequency import SlidingWindowThresholdFrequencyDetection
 from metric_timeseries_analysis.analysis.profiles.spike_drop import SpikeDropDetection
@@ -49,6 +53,10 @@ class ProfileBinding(Generic[OptionsT]):
 class AnalysisProfileRegistry:
     def __init__(self) -> None:
         bindings: list[ProfileBinding[Any]] = [
+            ProfileBinding(
+                CoincidentAnomalyDetection(),
+                build_coincident_anomaly_options,
+            ),
             ProfileBinding(
                 SlidingWindowThresholdFrequencyDetection(),
                 build_sliding_window_threshold_options,

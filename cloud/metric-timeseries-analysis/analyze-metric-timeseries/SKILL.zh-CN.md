@@ -1,11 +1,11 @@
 ---
 name: analyze-metric-timeseries
-description: 分析数据库和云服务诊断中的云监控指标时序数据，包括滑动窗口阈值频次、突增/突降异常、中位数与 p75 基线、相邻点方向计数上升趋势和趋势预测。适用于诊断流程需要基于 CES 或类似监控数据生成指标证据，且不应将原始数据点放入模型上下文的场景。
+description: 分析数据库和云服务诊断中的一个或两个云监控指标时序数据，包括阈值频次、突增/突降、异常关联、中位数与 p75、相邻点趋势和趋势预测。适用于诊断流程需要紧凑指标证据且不应将原始数据点放入模型上下文的场景。
 ---
 
 # 分析指标时序数据
 
-使用这个 skill 将一项云监控指标查询转换为紧凑的诊断证据。内置脚本在内部获取和缓存 CES 数据，执行一个分析 profile，并返回不包含原始数据点的结构化 JSON。
+使用这个 skill 将指标查询转换为紧凑的诊断证据。内置脚本在内部获取 CES 数据、按指标独立缓存、执行一个分析 profile，并返回不包含原始数据点的结构化 JSON。
 
 ## 执行流程
 
@@ -26,12 +26,13 @@ description: 分析数据库和云服务诊断中的云监控指标时序数据�
 - [ ] `region`
 - [ ] `project_id`
 - [ ] `metric.namespace`
-- [ ] `metric.metric_name`
+- [ ] `metric.metric_name`，值为非空的准确指标 ID 数组
 - [ ] 每个 `metric.dimensions[].name` 和 `.value`
 - [ ] 用户可理解的时间范围，例如“最近一小时”或“昨天 09:00 到 12:00”
 - [ ] `period`
 - [ ] `analysis.profile`
 - [ ] 使用 `sliding_window_threshold_frequency_detection` 时的 `analysis.threshold`
+- [ ] 使用 `coincident_anomaly_detection` 时的 `analysis.time_point`
 
 存在无法确定的必填值时，必须一次性向用户询问所有缺失字段。必填字段缺失时，不要运行或重试脚本。不得猜值或提交示例占位值。可选 profile 参数可以省略，由脚本应用默认值。
 
@@ -53,6 +54,7 @@ description: 分析数据库和云服务诊断中的云监控指标时序数据�
 | --- | --- |
 | `sliding_window_threshold_frequency_detection` | 诊断需要判断指标高于或低于阈值的频次。 |
 | `spike_drop_detection` | 诊断需要突增或突降证据。 |
+| `coincident_anomaly_detection` | 诊断需要判断两个指标是否都在故障发生前出现异常。 |
 | `median_p75_statistics` | 诊断需要中位数和 p75 基线。 |
 | `rising_trend_detection` | 诊断需要根据相邻点变化判断上升、下降或方向不明确。 |
 | `trend_prediction` | 诊断需要未来七天预测，并且已有至少七天历史数据。 |
@@ -73,7 +75,7 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
   "project_id": "<project-id>",
   "metric": {
     "namespace": "<namespace>",
-    "metric_name": "<metric-name>",
+    "metric_name": ["<metric-name>"],
     "dimensions": [{"name": "<dimension-name>", "value": "<dimension-value>"}]
   },
   "time_window": {"from": <resolved-ms>, "to": <resolved-ms>},
@@ -83,6 +85,8 @@ python3 scripts/analyze_metric_timeseries.py profile <profile-name> --help
 ```
 
 所选 profile 的参数只能添加在 `analysis` 中，且必须是文档中定义的参数。将全部占位符替换为明确值后，把对象序列化为紧凑 JSON：
+
+除 `coincident_anomaly_detection` 必须传入两个指标名称外，其他 profile 只能传入一个指标名称。关联分析还要把自然语言故障时间解析为毫秒时间戳并写入 `analysis.time_point`；默认回看故障发生前 1800 秒。
 
 ```bash
 python3 scripts/analyze_metric_timeseries.py \
@@ -94,7 +98,7 @@ python3 scripts/analyze_metric_timeseries.py \
 ## 处理结果
 
 - `success=true`：使用 `summary`、`findings` 以及可选的 `statistics` 或 `forecast` 作为诊断证据。
-- `missing_required_input`：读取完整的 `missing_fields` 列表。先从可信上下文补充字段，再一次性向用户询问所有仍无法确定的值。因为 `retryable=false`，在全部字段就绪前必须停止，不得再次调用脚本。
+- `missing_required_input`：读取完整的 `missing_fields` 列表。先从可信上下文补充字段，再一次性向用户询问所有仍无法确定的值。在全部字段就绪前必须停止，不得再次调用脚本。
 - 其他 `invalid_request`：根据 `message` 报告被拒绝的字段或参数。
 - `query_too_large`：提高 `period` 或按时间拆分查询，同时保持用户的诊断意图。
 - `data_fetch_failed`：停止并报告内部 CES MCP CLI 适配失败。
@@ -108,7 +112,7 @@ python3 scripts/analyze_metric_timeseries.py \
 - 内置路径相对于当前 skill 根目录执行。
 - 运行环境需要 Python 3.10+、`requirements.txt` 中的依赖，以及已经配置好的 `huaweicloud-mcp` 命令。
 - 脚本是唯一公开执行入口。不要使用 `python -c`，不要导入内部模块、实例化 profile 类或直接调用 CES。
-- CES 获取、`average` 聚合方式、dataset 存储、缓存策略和 cache key 都是内部实现。
+- CES 分批获取、`average` 聚合方式、按指标独立的 dataset 存储、缓存策略和 cache key 都是内部实现。
 - 维度名称由具体指标决定。只有目标 CES 指标定义了 `instance_id` 时才使用它。
 - 失败后不要试探其他 Python import、类名、子命令或参数传递方式。
 
@@ -116,11 +120,9 @@ python3 scripts/analyze_metric_timeseries.py \
 
 对于华为云数据库指标，在选择 namespace、准确指标 ID、维度 key 或维度顺序前，阅读 `references/ces-database-metric-parameters.zh-CN.md`。
 
-对于 RDS for MySQL 实例或数据库代理指标，阅读
-`references/rds-mysql-metric-catalog.zh-CN.md`，将官方指标名称映射为准确指标 ID。
+对于 RDS for MySQL 实例或数据库代理指标，阅读 `references/rds-mysql-metric-catalog.zh-CN.md`，将官方指标名称映射为准确指标 ID。
 
 仅在以下情况读取 `references/analysis-contract.zh-CN.md`：
 
 - 需要精确字段约束或 profile 默认参数；
-- 需要解释 profile 特有的 `statistics`、`forecast` 或 finding evidence；
-- 涉及 CES 查询限制、缓存行为或完整错误契约。
+- 需要解释 profile 特有的 `statistics`、`forecast` 或 finding evidence，或者涉及 CES 查询限制、缓存行为或完整错误契约。

@@ -26,6 +26,26 @@ class SpikeDropOptions:
 
 
 @dataclass(frozen=True, slots=True)
+class CoincidentAnomalyOptions:
+    time_point: int
+    lookback_seconds: int
+    box_scale: float
+    direction: SpikeDropDirection
+    window_size: int
+    residual_sen: float
+    nonzero: bool
+
+    def spike_drop_options(self) -> SpikeDropOptions:
+        return SpikeDropOptions(
+            box_scale=self.box_scale,
+            direction=self.direction,
+            window_size=self.window_size,
+            residual_sen=self.residual_sen,
+            nonzero=self.nonzero,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MedianP75Options:
     smoothing_time: int
 
@@ -53,6 +73,20 @@ def build_sliding_window_threshold_options(
 
 def build_spike_drop_options(analysis: Mapping[str, Any]) -> SpikeDropOptions:
     return SpikeDropOptions(
+        box_scale=float(analysis["box_scale"]),
+        direction=cast(SpikeDropDirection, analysis["direction"]),
+        window_size=int(analysis["window_size"]),
+        residual_sen=float(analysis["residual_sen"]),
+        nonzero=bool(analysis["nonzero"]),
+    )
+
+
+def build_coincident_anomaly_options(
+    analysis: Mapping[str, Any],
+) -> CoincidentAnomalyOptions:
+    return CoincidentAnomalyOptions(
+        time_point=int(analysis["time_point"]),
+        lookback_seconds=int(analysis["lookback_seconds"]),
         box_scale=float(analysis["box_scale"]),
         direction=cast(SpikeDropDirection, analysis["direction"]),
         window_size=int(analysis["window_size"]),

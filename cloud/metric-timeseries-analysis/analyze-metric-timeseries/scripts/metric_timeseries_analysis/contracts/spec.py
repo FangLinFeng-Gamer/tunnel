@@ -6,6 +6,7 @@ from typing import Any
 from metric_timeseries_analysis.analysis.profile_catalog import (
     PROFILE_DEFINITIONS,
     normalize_profile_analysis,
+    validate_profile_metric_count,
 )
 from metric_timeseries_analysis.ces.query_builder import build_ces_query
 from metric_timeseries_analysis.constants import DEFAULT_FILTER
@@ -36,11 +37,15 @@ def find_missing_required_fields(args: dict[str, Any]) -> list[str]:
         )
     elif isinstance(metric, dict):
         _append_if_missing(missing, "metric.namespace", metric.get("namespace"))
-        _append_if_missing(
-            missing,
-            "metric.metric_name",
-            metric.get("metric_name") or metric.get("name"),
-        )
+        metric_names = metric.get("metric_name")
+        _append_if_missing(missing, "metric.metric_name", metric_names)
+        if isinstance(metric_names, list):
+            for index, metric_name in enumerate(metric_names):
+                _append_if_missing(
+                    missing,
+                    f"metric.metric_name[{index}]",
+                    metric_name,
+                )
         dimensions = metric.get("dimensions")
         if _is_missing(dimensions):
             missing.append("metric.dimensions")
@@ -93,7 +98,7 @@ def normalize_metric_analysis_spec(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(analysis, dict):
         raise MetricAnalysisError("invalid_request", "analysis must be an object when provided")
 
-    metric_name = _require_text(metric.get("metric_name") or metric.get("name"), "metric.metric_name")
+    metric_names = _normalize_metric_names(metric.get("metric_name"))
     namespace = _require_text(metric.get("namespace"), "metric.namespace")
     region = _require_text(args.get("region"), "region")
     project_id = _require_text(args.get("project_id"), "project_id")
@@ -103,33 +108,52 @@ def normalize_metric_analysis_spec(args: dict[str, Any]) -> dict[str, Any]:
     data_filter = DEFAULT_FILTER
     _validate_text_length(project_id, "project_id", 1, 64)
     _validate_namespace(namespace)
-    _validate_ces_name(metric_name, "metric.metric_name", 96)
+    for metric_name in metric_names:
+        _validate_ces_name(metric_name, "metric.metric_name", 96)
     _validate_timestamp(start_ms, "time_window.from")
     _validate_timestamp(end_ms, "time_window.to")
 
     profile = _require_text(analysis.get("profile"), "analysis.profile")
     if profile not in PROFILE_DEFINITIONS:
         raise MetricAnalysisError("invalid_request", f"unsupported analysis profile: {profile}")
+    validate_profile_metric_count(profile, len(metric_names))
     normalized_analysis = normalize_profile_analysis(profile, analysis)
+    if profile == "coincident_anomaly_detection":
+        time_point = normalized_analysis["time_point"]
+        _validate_timestamp(time_point, "analysis.time_point")
+        if not start_ms <= time_point <= end_ms:
+            raise MetricAnalysisError(
+                "invalid_request",
+                "analysis.time_point must be inside time_window",
+            )
+        lookback_start = time_point - normalized_analysis["lookback_seconds"] * 1000
+        if lookback_start < start_ms:
+            raise MetricAnalysisError(
+                "invalid_request",
+                "time_window must cover the complete correlation lookback window",
+            )
 
     dimensions = _normalize_dimensions(metric.get("dimensions"))
-    ces_query = build_ces_query(
-        project_id=project_id,
-        region=region,
-        namespace=namespace,
-        metric_name=metric_name,
-        dimensions=dimensions,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        period=period,
-        data_filter=data_filter,
-    )
+    ces_queries = [
+        build_ces_query(
+            project_id=project_id,
+            region=region,
+            namespace=namespace,
+            metric_name=metric_name,
+            dimensions=dimensions,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            period=period,
+            data_filter=data_filter,
+        )
+        for metric_name in metric_names
+    ]
 
     return {
         "region": region,
         "project_id": project_id,
         "metric": {
-            "metric_name": metric_name,
+            "metric_name": metric_names,
             "namespace": namespace,
             "dimensions": dimensions,
         },
@@ -137,7 +161,7 @@ def normalize_metric_analysis_spec(args: dict[str, Any]) -> dict[str, Any]:
         "period": period,
         "filter": data_filter,
         "analysis": normalized_analysis,
-        "ces_query": ces_query,
+        "ces_queries": ces_queries,
     }
 
 
@@ -167,6 +191,18 @@ def _require_text(value: Any, field: str) -> str:
     if not text:
         raise MetricAnalysisError("invalid_request", f"{field} is required")
     return text
+
+
+def _normalize_metric_names(value: Any) -> list[str]:
+    field = "metric.metric_name"
+    if not isinstance(value, list):
+        raise MetricAnalysisError("invalid_request", f"{field} must be an array of strings")
+    if not value:
+        raise MetricAnalysisError("invalid_request", f"{field} must not be empty")
+    names = [_require_text(item, f"{field}[{index}]") for index, item in enumerate(value)]
+    if len(set(names)) != len(names):
+        raise MetricAnalysisError("invalid_request", f"{field} must not contain duplicates")
+    return names
 
 
 def _to_int(value: Any, field: str) -> int:

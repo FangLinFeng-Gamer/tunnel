@@ -1,11 +1,11 @@
 ---
 name: analyze-metric-timeseries
-description: Analyzes cloud monitoring metric time series for database and service diagnostics, including threshold frequency, spike/drop anomalies, median and p75 baselines, direction-count rising trends, and trend forecasting. Use when a diagnostic workflow needs metric evidence from CES or similar monitoring data without placing raw datapoints in model context.
+description: Analyzes one or two cloud monitoring metric time series for database and service diagnostics, including threshold frequency, spike/drop anomalies, anomaly correlation, median and p75 baselines, direction-count rising trends, and forecasting. Use when a diagnostic workflow needs compact metric evidence without placing raw datapoints in model context.
 ---
 
 # Analyze Metric Time-Series
 
-Use this skill to turn one cloud metric query into compact diagnostic evidence. The bundled script fetches CES data internally, caches it, runs one analysis profile, and returns structured JSON without exposing raw datapoints.
+Use this skill to turn a metric query into compact diagnostic evidence. The bundled script fetches CES data internally, caches each metric independently, runs one analysis profile, and returns structured JSON without exposing raw datapoints.
 
 ## Workflow
 
@@ -26,12 +26,13 @@ Before execution, confirm concrete values for:
 - [ ] `region`
 - [ ] `project_id`
 - [ ] `metric.namespace`
-- [ ] `metric.metric_name`
+- [ ] `metric.metric_name` as a non-empty array of exact metric IDs
 - [ ] Every `metric.dimensions[].name` and `.value`
 - [ ] A user-facing time range, such as "the last hour" or "yesterday from 09:00 to 12:00"
 - [ ] `period`
 - [ ] `analysis.profile`
 - [ ] `analysis.threshold` when using `sliding_window_threshold_frequency_detection`
+- [ ] `analysis.time_point` when using `coincident_anomaly_detection`
 
 If any required value is unavailable, ask the user for all missing fields in one clarification. Do not run or retry the script while required fields are missing. Never invent values or submit example placeholders. Optional profile parameters may be omitted so the script applies its defaults.
 
@@ -53,6 +54,7 @@ Never ask the user to provide millisecond timestamps or perform the conversion.
 | --- | --- |
 | `sliding_window_threshold_frequency_detection` | The diagnosis needs the frequency of values above or below a threshold. |
 | `spike_drop_detection` | The diagnosis needs abrupt spike or drop evidence. |
+| `coincident_anomaly_detection` | The diagnosis needs to know whether exactly two metrics both had anomalies before an incident. |
 | `median_p75_statistics` | The diagnosis needs median and p75 baseline values. |
 | `rising_trend_detection` | The diagnosis needs upward, downward, or unclear direction from adjacent changes. |
 | `trend_prediction` | The diagnosis needs a seven-day forecast and at least seven days of history are available. |
@@ -73,7 +75,7 @@ Build exactly this object shape. The placeholders show structure only; never sub
   "project_id": "<project-id>",
   "metric": {
     "namespace": "<namespace>",
-    "metric_name": "<metric-name>",
+    "metric_name": ["<metric-name>"],
     "dimensions": [{"name": "<dimension-name>", "value": "<dimension-value>"}]
   },
   "time_window": {"from": <resolved-ms>, "to": <resolved-ms>},
@@ -83,6 +85,8 @@ Build exactly this object shape. The placeholders show structure only; never sub
 ```
 
 Add only documented options for the selected profile under `analysis`. After replacing every placeholder with a concrete value, serialize the object as compact JSON:
+
+Use exactly one metric name for every profile except `coincident_anomaly_detection`, which requires exactly two. For correlation, resolve the incident time to milliseconds as `analysis.time_point`; the default lookback is the preceding 1800 seconds.
 
 ```bash
 python3 scripts/analyze_metric_timeseries.py \
@@ -94,7 +98,7 @@ python3 scripts/analyze_metric_timeseries.py \
 ## Handle Results
 
 - `success=true`: use `summary`, `findings`, and optional `statistics` or `forecast` as diagnostic evidence.
-- `missing_required_input`: read the complete `missing_fields` list. Resolve fields from trusted context first, then ask the user for every still-unresolved value in one clarification. Because `retryable=false`, stop and do not call the script again until all values are available.
+- `missing_required_input`: read the complete `missing_fields` list. Resolve fields from trusted context first, then ask the user for every still-unresolved value in one clarification. Stop and do not call the script again until all values are available.
 - Other `invalid_request`: report the rejected field or option from `message`.
 - `query_too_large`: increase `period` or split the query by time; preserve the user's diagnostic intent.
 - `data_fetch_failed`: stop and report that the internal CES MCP CLI adapter failed.
@@ -108,7 +112,7 @@ Never include raw datapoints in prompts, tool results, or final answers.
 - Run bundled paths relative to this skill's root.
 - The environment needs Python 3.10+, packages from `requirements.txt`, and a configured `huaweicloud-mcp` command.
 - The script is the only public execution entry point. Do not use `python -c`, import internal modules, instantiate profile classes, or call CES directly.
-- CES fetching, the `average` aggregation filter, dataset storage, cache policy, and cache keys are internal.
+- CES batching, the `average` aggregation filter, per-metric dataset storage, cache policy, and cache keys are internal.
 - A dimension name is metric-specific. Use `instance_id` only when the target CES metric defines that dimension.
 - Do not probe alternative Python imports, class names, subcommands, or parameter styles after a failure.
 
@@ -116,12 +120,9 @@ Never include raw datapoints in prompts, tool results, or final answers.
 
 For a Huawei Cloud database metric, read `references/ces-database-metric-parameters.md` before selecting the namespace, exact metric ID, dimension keys, or dimension order.
 
-For an RDS for MySQL instance or database proxy metric, read
-`references/rds-mysql-metric-catalog.md` to map the official metric name to the
-exact metric ID.
+For an RDS for MySQL instance or database proxy metric, read `references/rds-mysql-metric-catalog.md` to map the official metric name to the exact metric ID.
 
 Read `references/analysis-contract.md` only when:
 
 - exact field constraints or profile defaults are needed;
-- profile-specific `statistics`, `forecast`, or finding evidence must be interpreted;
-- CES query limits, cache behavior, or the complete error contract is relevant.
+- profile-specific `statistics`, `forecast`, or finding evidence must be interpreted; or CES query limits, cache behavior, or the complete error contract is relevant.

@@ -24,6 +24,8 @@ class ProfileDefinition:
     summary: str
     use_for: str
     options: tuple[ProfileOption, ...]
+    min_metric_count: int = 1
+    max_metric_count: int = 1
 
 
 PROFILE_DEFINITIONS = {
@@ -86,6 +88,71 @@ PROFILE_DEFINITIONS = {
                 default="up",
                 choices=("up", "down", "all"),
                 example="all",
+            ),
+            ProfileOption(
+                name="window_size",
+                value_type="integer",
+                required=False,
+                description="Mean and median smoothing duration in seconds.",
+                default=3600,
+                example=3600,
+            ),
+            ProfileOption(
+                name="residual_sen",
+                value_type="number",
+                required=False,
+                description="Minimum mean-filter residual range required before outlier detection.",
+                default=10.0,
+                example=10.0,
+            ),
+            ProfileOption(
+                name="nonzero",
+                value_type="boolean",
+                required=False,
+                description="Exclude zero values when deriving box-plot bounds.",
+                default=False,
+                example=False,
+            ),
+        ),
+    ),
+    "coincident_anomaly_detection": ProfileDefinition(
+        name="coincident_anomaly_detection",
+        summary="Detect whether two metrics both have anomalies before an incident.",
+        use_for="Use when a diagnosis needs to determine whether two metric anomalies occurred in the same pre-incident time window.",
+        min_metric_count=2,
+        max_metric_count=2,
+        options=(
+            ProfileOption(
+                name="time_point",
+                value_type="integer",
+                required=True,
+                description="Incident time as a Unix timestamp in milliseconds.",
+                example=1784201200000,
+            ),
+            ProfileOption(
+                name="lookback_seconds",
+                value_type="integer",
+                required=False,
+                description="Pre-incident correlation window in seconds.",
+                default=1800,
+                example=1800,
+            ),
+            ProfileOption(
+                name="box_scale",
+                value_type="number",
+                required=False,
+                description="IQR multiplier used to derive box-plot outlier bounds.",
+                default=3.0,
+                example=3.0,
+            ),
+            ProfileOption(
+                name="direction",
+                value_type="string",
+                required=False,
+                description="Anomaly direction used for both metrics.",
+                default="up",
+                choices=("up", "down", "all"),
+                example="up",
             ),
             ProfileOption(
                 name="window_size",
@@ -181,6 +248,12 @@ def normalize_profile_analysis(profile_name: str, analysis: dict[str, Any]) -> d
                 "invalid_request",
                 "analysis.min_frequency must not exceed analysis.window_points",
             )
+    if profile_name == "coincident_anomaly_detection":
+        if normalized["lookback_seconds"] < 1:
+            raise MetricAnalysisError(
+                "invalid_request",
+                "analysis.lookback_seconds must be greater than 0",
+            )
     return normalized
 
 
@@ -220,6 +293,7 @@ def _normalize_option(option: ProfileOption, value: Any) -> Any:
         "min_frequency",
         "smoothing_time",
         "window_size",
+        "lookback_seconds",
     } and normalized < 1:
         raise MetricAnalysisError("invalid_request", f"{field} must be greater than 0")
     if option.name == "box_scale" and normalized <= 0:
@@ -230,6 +304,27 @@ def _normalize_option(option: ProfileOption, value: Any) -> Any:
             f"{field} must be greater than or equal to 0",
         )
     return normalized
+
+
+def validate_profile_metric_count(profile_name: str, metric_count: int) -> None:
+    definition = PROFILE_DEFINITIONS[profile_name]
+    if definition.min_metric_count == definition.max_metric_count:
+        required = definition.min_metric_count
+        if metric_count != required:
+            noun = "metric" if required == 1 else "metrics"
+            raise MetricAnalysisError(
+                "invalid_request",
+                f"{profile_name} requires exactly {required} {noun}",
+            )
+        return
+    if not definition.min_metric_count <= metric_count <= definition.max_metric_count:
+        raise MetricAnalysisError(
+            "invalid_request",
+            (
+                f"{profile_name} requires between "
+                f"{definition.min_metric_count} and {definition.max_metric_count} metrics"
+            ),
+        )
 
 
 def profile_definition_to_dict(definition: ProfileDefinition) -> dict[str, Any]:
@@ -244,6 +339,8 @@ def profile_definition_to_dict(definition: ProfileDefinition) -> dict[str, Any]:
         "name": definition.name,
         "summary": definition.summary,
         "use_for": definition.use_for,
+        "min_metric_count": definition.min_metric_count,
+        "max_metric_count": definition.max_metric_count,
         "options": [
             {
                 "name": option.name,

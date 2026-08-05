@@ -37,3 +37,39 @@ def build_ces_query(
         "backend_version": BACKEND_VERSION,
     }
 
+
+def build_ces_batch_query(single_queries: list[dict[str, Any]]) -> dict[str, Any]:
+    if not single_queries:
+        raise ValueError("single_queries must not be empty")
+    first = single_queries[0]
+    first_body = first["request_body"]
+    shared_fields = (
+        "project_id",
+        "region",
+        "normalization_version",
+        "backend_version",
+    )
+    body_fields = ("from", "to", "period", "filter")
+    for query in single_queries[1:]:
+        if any(query[field] != first[field] for field in shared_fields):
+            raise ValueError("CES batch queries must share routing and backend fields")
+        if any(query["request_body"][field] != first_body[field] for field in body_fields):
+            raise ValueError("CES batch queries must share time, period, and filter fields")
+
+    return {
+        "project_id": first["project_id"],
+        "region": first["region"],
+        "request_body": {
+            "metrics": [
+                metric
+                for query in single_queries
+                for metric in query["request_body"]["metrics"]
+            ],
+            "from": first_body["from"],
+            "to": first_body["to"],
+            "period": first_body["period"],
+            "filter": first_body["filter"],
+        },
+        "normalization_version": first["normalization_version"],
+        "backend_version": first["backend_version"],
+    }

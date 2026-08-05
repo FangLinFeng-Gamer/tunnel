@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import os
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from metric_timeseries_analysis.constants import CES_FETCH_TIMEOUT_SECONDS
 from metric_timeseries_analysis.errors import MetricAnalysisError
 from metric_timeseries_analysis.io.paths import cache_index_dir
 
 
-CACHE_LOCK_TIMEOUT_SECONDS = 75
+CACHE_LOCK_TIMEOUT_SECONDS = CES_FETCH_TIMEOUT_SECONDS + 30
 CACHE_LOCK_STALE_SECONDS = 300
 CACHE_LOCK_POLL_SECONDS = 0.05
 
@@ -24,18 +25,35 @@ def cache_key_lock(cache_key: str) -> Iterator[None]:
     while True:
         try:
             lock_dir.mkdir()
-            (lock_dir / "owner").write_text(str(os.getpid()), encoding="ascii")
-            break
         except FileExistsError:
             _remove_stale_lock(lock_dir)
             if time.monotonic() >= deadline:
                 raise MetricAnalysisError("internal_error", f"timed out waiting for cache lock: {cache_key}")
             time.sleep(CACHE_LOCK_POLL_SECONDS)
+            continue
+
+        try:
+            (lock_dir / "owner").write_text(str(os.getpid()), encoding="ascii")
+        except OSError as exc:
+            _remove_lock(lock_dir)
+            raise MetricAnalysisError(
+                "internal_error",
+                "failed to initialize cache lock",
+            ) from exc
+        break
 
     try:
         yield
     finally:
         _remove_lock(lock_dir)
+
+
+@contextmanager
+def cache_key_locks(cache_keys: list[str]) -> Iterator[None]:
+    with ExitStack() as stack:
+        for cache_key in sorted(set(cache_keys)):
+            stack.enter_context(cache_key_lock(cache_key))
+        yield
 
 
 def _lock_dir(cache_key: str) -> Path:
